@@ -239,3 +239,13 @@ AWS permissions; see `reports/deployment-status.md`.
 - Recommendations are suggestions only; "Book this for us" calls the same `check_action` path as VenueBook.
 - Qloo client follows the Qrowd spike (`../Qrowd/spike/results.md`): `/search` to resolve a seed, then `/v2/insights` with `signal.interests.entities` (filter.type alone returns 400). Movie, music and place types were checked live afterwards; place results use `filter.location.query` (signal.location.query is ignored). Place results can include hotels. Set `QLOO_API_BASE_URL` if needed.
 - Tests: `tests/test_personalization.py` (23 tests). Full suite: `.venv/bin/python -m pytest -q`.
+
+## Qloo activity categories (live check, San Jose)
+
+- **Tested (19 requests, one per tag):** museums, parks, zoos, theaters (performing arts), movie theaters, bowling, golf, concert hall, music venues, escape rooms, tourist attractions, cooking classes, workshops, art studios, hiking areas, nature preserves, aquariums, playgrounds, amusement parks. Tags came from `GET /v2/tags?filter.query=…&filter.parents.types=urn:entity:place`, not guesses.
+- **VERIFIED LIVE and enabled in code (`ACTIVITY_CATEGORIES`):** museums, parks, zoos, theaters, movie theaters, bowling, golf, concerts, escape rooms, tourist attractions, art studios, outdoor recreation (hiking area), nature preserves, playgrounds, amusement parks. Thin (1 result): zoos, concerts, escape rooms, art studios, nature preserves, playgrounds.
+- **NOT VERIFIED, not enabled:** cooking classes, workshops and aquariums (request succeeded, 0 results in San Jose); music venues (only a setting tag, 1 result); family attractions (no family-specific tag tested). Unknown or unverified categories fall back to Demo recommendations and say so.
+- **Quality notes:** movie_theater returns malls; tourist_attraction returned a casino, so it is not in the general mix.
+- **Code changes:** `pact/qloo_client.py` (`ACTIVITY_CATEGORIES`, `GENERAL_ACTIVITY`, aliases, `activity_category` parameter, per-category cache key, `unknown_category` fallback), `pact/assistant.py` (category detection and honest scope text), `tests/test_personalization.py` (+8 tests), README table. Comma-separated `filter.tags` is OR (verified live), used for the general mix. Location uses `filter.location.query`; place requests seed from a brand entity.
+- **Commands:** tag discovery and per-tag probes were small Python scripts run from the scratchpad with `QLOO_API_KEY` passed as an inline environment variable for that one command; no raw responses were saved to the repo. Results: `/v2/tags`, `/search`, `/v2/insights`.
+- **Secrets:** the key was never printed, written to a file, or committed (diff scanned; see commit).

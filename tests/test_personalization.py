@@ -285,3 +285,94 @@ def test_qloo_400_and_unresolvable_seed_fall_back():
 
     out = Recommender(QlooClient(api_key=SECRET, opener=bad, retries=0)).recommend("s", "movie", enabled=True, personalization=True)
     assert out["provider"] == "local" and out["note"] == "http_error"
+
+
+# ---- activity categories ----
+
+from pact.qloo_client import ACTIVITY_CATEGORIES, GENERAL_ACTIVITY, resolve_activity_category  # noqa: E402
+
+
+def _recording_client(urls):
+    class Resp:
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n): return json.dumps(self.body).encode()
+
+    def opener(req, timeout):
+        urls.append(req.full_url)
+        if "/search" in req.full_url:
+            return Resp({"results": [{"name": "Seed", "entity_id": "SEED-9"}]})
+        return Resp({"success": True, "results": {"entities": [{"name": "Rosicrucian Egyptian Museum", "query": {"affinity": 0.9}}]}})
+
+    return QlooClient(api_key=SECRET, opener=opener)
+
+
+def test_explicit_activity_category_uses_its_verified_tag_and_city():
+    urls = []
+    out = _recording_client(urls).fetch("activity", "San Jose", 3, None, "museums")
+    insights = urls[-1]
+    assert out[0]["name"] == "Rosicrucian Egyptian Museum"
+    assert "filter.tags=urn%3Atag%3Acategory%3Aplace%3Amuseum" in insights and "filter.location.query=San+Jose" in insights
+    assert "amusement_park" not in insights
+
+
+def test_general_activity_search_is_a_mix_not_amusement_parks_only():
+    urls = []
+    _recording_client(urls).fetch("activity", "San Jose", 3)
+    tags = urls[-1]
+    assert tags.count("category%3Aplace%3A") >= 5 and "museum" in tags and "park" in tags and "bowling_alley" in tags
+    assert len(GENERAL_ACTIVITY) > 3 and len(ACTIVITY_CATEGORIES) >= 10
+
+
+def test_category_aliases_and_unverified_categories():
+    assert resolve_activity_category("Museum") == "museums" and resolve_activity_category("hiking") == "outdoor recreation"
+    assert resolve_activity_category("theme parks") == "amusement parks"
+    for unverified in ("cooking classes", "workshops", "aquariums", "family attractions", "karaoke", None, ""):
+        assert resolve_activity_category(unverified) is None
+
+
+def test_unknown_activity_category_falls_back_without_calling_qloo():
+    mock = MockQlooProvider()
+    out = Recommender(mock).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category="cooking classes")
+    assert out["provider"] == "local" and out["note"] == "unknown_category" and out["category"] is None and mock.calls == 0
+
+
+def test_activity_missing_key_and_failure_fall_back():
+    none = Recommender(QlooClient(api_key="")).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category="museums")
+    assert none["provider"] == "local" and none["note"] == "missing_key" and none["items"]
+    boom = Recommender(MockQlooProvider(error="timeout")).recommend("s", "activity", enabled=True, personalization=True, city="San Jose")
+    assert boom["provider"] == "local" and boom["note"] == "timeout"
+
+
+def test_activity_cache_is_per_category():
+    mock = MockQlooProvider()
+    rec = Recommender(mock)
+    for cat in ("museums", "zoos", "museums"):
+        rec.recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category=cat)
+    assert mock.calls == 2
+
+
+def test_activity_text_names_the_category_and_unknown_is_honest(app, monkeypatch):
+    mock = MockQlooProvider([{"name": "Rosicrucian Egyptian Museum", "reason": "mock", "score": 0.9}])
+    monkeypatch.setattr(srv, "recommender_default", Recommender(mock))
+    c = client(app)
+    c.post("/api/settings", json={"location": {"city": "San Jose", "country": "US"}})
+    museum = say(c, "What museums are near me?")
+    assert museum["provider"]["id"] == "qloo" and museum["card"]["recommendation"]["category"] == "museums" and "museums" in museum["assistant_text"]
+    assert mock.last_category == "museums"
+    unknown = say(c, "What cooking classes are near me?")
+    assert unknown["provider"]["id"] == "local" and "can't verify" in unknown["assistant_text"]
+    general = say(c, "What is there to do near me?")
+    text = general["assistant_text"].lower()
+    assert "mix" in text and "museums" in text and "bowling" in text   # a mix, never presented as amusement parks only
+
+
+def test_activity_recommendation_still_goes_through_policy(app, monkeypatch):
+    monkeypatch.setattr(srv, "recommender_default", Recommender(MockQlooProvider([{"name": "Funzone Mega Party", "reason": "mock", "score": 1.0}])))
+    c = client(app)
+    c.post("/api/settings", json={"location": {"city": "San Jose"}})
+    first = say(c, "Recommend a bowling place near me")
+    assert first["card"]["recommendation"]["category"] == "bowling"
+    book = say(c, "Book this for us", cid=first["conversation_id"])
+    assert book["card"]["decision"]["decision"] == "ask" and "check_action" in book["trace"]

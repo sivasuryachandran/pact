@@ -84,6 +84,48 @@ It is never used for authentication, policy, approvals, time or facts. The clien
 artist types. Movie, music and place types were then checked live (places use `filter.location.query` for the city). For another host set `QLOO_API_BASE_URL`. Without a key, on a timeout or on an invalid response, PACT
 shows **Demo recommendations** from a built-in local list.
 
+### Activity recommendations (location-aware)
+
+PACT supports location-aware activity recommendations through Qloo. The first live validation used amusement parks, but amusement parks are only one supported category—not the definition of activities. The integration is designed to support museums, parks, zoos, theaters, bowling, golf, concerts, escape rooms, classes, family attractions, and other verified Qloo categories. Each category must be validated against the live API before being described as supported.
+
+Ask for a category ("museums near me") or leave it open ("what is there to do near me?"), which searches a mixed set
+(museums, parks, theaters, bowling, outdoor recreation, amusement parks). An unverified category such as cooking
+classes never guesses a tag: PACT says it can't verify it yet and shows **Demo recommendations**.
+
+Live check against the Qloo hackathon API, location "San Jose" (one request per tag, `take=10`, one shared seed
+taste; "located" = at least two thirds of results are in the Bay Area):
+
+| Category | Qloo tag | San Jose live status | Example results |
+|---|---|---|---|
+| Museums | `urn:tag:category:place:museum` | VERIFIED LIVE | Winchester Mystery House; Rosicrucian Egyptian Museum; San Jose Museum of Quilts & Textiles |
+| Parks | `urn:tag:category:place:park` | VERIFIED LIVE | Monopoly in the Park; Calero County Park; Alviso Marina County Park |
+| Zoos | `urn:tag:category:place:zoo` | VERIFIED LIVE (1 result) | Happy Hollow Park & Zoo |
+| Theaters (performing arts) | `urn:tag:category:place:performing_arts_theater` | VERIFIED LIVE | San Jose Center for the Performing Arts; Montgomery Theater; San Jose Stage |
+| Movie theaters | `urn:tag:category:place:movie_theater` | VERIFIED LIVE (mixed quality: returns malls) | Westfield Valley Fair; Eastridge Center; AMC Saratoga 14 |
+| Bowling | `urn:tag:category:place:bowling_alley` | VERIFIED LIVE | 4th Street Bowl; San Pedro Social; Bowlmor Cupertino |
+| Golf | `urn:tag:category:place:golf_course` | VERIFIED LIVE | Topgolf; Boulder Ridge Golf Club; Los Lagos Golf Course |
+| Concerts (concert hall) | `urn:tag:category:place:concert_hall` | VERIFIED LIVE (1 result) | San Jose Center for the Performing Arts |
+| Music venues | `urn:tag:setting:qloo:music_venue` | NOT VERIFIED (a setting tag, not a place category; 1 result) | PETE BE Center |
+| Escape rooms | `urn:tag:category:place:escape_room_center` | VERIFIED LIVE (1 result) | Beat The Lock Escape Room |
+| Tourist attractions | `urn:tag:category:place:tourist_attraction` | VERIFIED LIVE (not family-specific; returned a casino) | Casino M8trix; Winchester Mystery House; Monopoly in the Park |
+| Family attractions | none | NOT VERIFIED (no family-specific tag tested) | none |
+| Art studios | `urn:tag:category:place:art_studio` | VERIFIED LIVE (1 result) | MACLA/Movimiento de Arte y Cultura Latino Americana |
+| Classes (cooking) | `urn:tag:category:place:cooking_class` | NOT VERIFIED (0 results) | none |
+| Workshops | `urn:tag:category:place:workshop` | NOT VERIFIED (0 results) | none |
+| Outdoor recreation (hiking areas) | `urn:tag:category:place:hiking_area` | VERIFIED LIVE | Calero County Park; Alviso Marina County Park; Rancho Cañada del Oro Open Space Preserve |
+| Nature preserves | `urn:tag:category:place:nature_preserve` | VERIFIED LIVE (1 result) | Rancho Cañada del Oro Open Space Preserve |
+| Aquariums | `urn:tag:category:place:aquarium` | NOT VERIFIED (0 results) | none |
+| Playgrounds | `urn:tag:category:place:playground` | VERIFIED LIVE (1 result) | Rotary PlayGarden |
+| Amusement parks | `urn:tag:category:place:amusement_park` | VERIFIED LIVE | California's Great America; Happy Hollow Park & Zoo; Golfland San Jose |
+| Any category when Qloo is off, keyless or failing | n/a | DEMO FALLBACK | Funzone Arcade; Riverside Mini Golf; City Science Museum |
+
+Results are live samples from one run, not a guarantee; Qloo data changes. Only VERIFIED LIVE categories are enabled in code.
+
+Qloo only provides optional personalization. Qloo never makes allow/ask/deny decisions. PACT policy enforcement
+always runs after recommendations: "Book this for us" calls the same `check_action` path as any other booking.
+QROWD code, data, scoring, and catalog are not used by PACT. The only thing carried over is the checked-in knowledge
+of which Qloo endpoints and parameters work.
+
 ### NVIDIA Nemotron (optional, comparison only)
 Set `NVIDIA_API_KEY`, `NVIDIA_MODEL_ID` and (if needed) `NVIDIA_API_BASE_URL` (an OpenAI-compatible
 endpoint; the default is NVIDIA's hosted API). Nemotron is an NVIDIA model, not an Amazon model. It can answer a
