@@ -1,0 +1,36 @@
+{
+  "name": "pact-signal",
+  "version": "0.1.0",
+  "description": "A procedural three.js firefly signal for assistant state, approval, and trust boundaries.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Siva Surya Chandran",
+  "sideEffects": false,
+  "files": ["dist", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" },
+    "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js", "require": "./dist/react.cjs" },
+    "./audio": { "types": "./dist/audio.d.ts", "import": "./dist/audio.js", "require": "./dist/audio.cjs" }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --config vitest.config.ts",
+    "e2e": "playwright test",
+    "dev": "vite --config demo/vite.config.ts"
+  },
+  "peerDependencies": { "three": ">=0.186.1 <0.187.0" },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/three": "0.186.0",
+    "playwright": "1.64.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "three": "0.186.1",
+    "tsup": "9.0.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5",
+    "vite": "8.3.4"
+  }
+}
