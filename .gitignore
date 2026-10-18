@@ -16,3 +16,12 @@ web/assets/
 *.pem
 .claude/
 docs/screens/measurements.json.bak
+.env.*
+!.env.example
+*.log
+logs/
+credentials
+credentials.*
+.aws/
+*.key
+secrets/

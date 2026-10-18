@@ -9,6 +9,8 @@ interface VoiceHandlers {
   onCommand: (text: string) => void;
   /** Interim words while the person is speaking. */
   onHeard?: (text: string) => void;
+  /** BCP-47 language for recognition, e.g. en-US. */
+  lang?: string;
 }
 
 /**
@@ -36,7 +38,7 @@ export function useWakeVoice(handlers: VoiceHandlers) {
   const start = useCallback(() => {
     if (!Recognition || recRef.current) return false;
     const rec = new Recognition();
-    rec.continuous = true; rec.interimResults = true; rec.lang = 'en-US';
+    rec.continuous = true; rec.interimResults = true; rec.lang = ref.current.lang || 'en-US';
     rec.onresult = (ev: any) => {
       const res = ev.results[ev.results.length - 1];
       const text = String(res[0].transcript).trim();

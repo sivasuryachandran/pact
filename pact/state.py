@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .canonical import ruleset_hash
+from .settings import default_settings
 
 
 def now_iso() -> str:
@@ -33,6 +34,7 @@ class StateStore:
         self.conversations: dict[str, dict[str, Any]] = {}
         self.trust_events: list[dict[str, Any]] = []
         self.usage = {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []}
+        self.settings = default_settings()  # survives reset(); wiped only by clear_all()
         self.household = {
             "household_id": household_id,
             "members": [
@@ -167,6 +169,23 @@ class StateStore:
             self._init_defaults(household_id)
             self._persist()
 
+    def update_settings(self, settings: dict[str, Any]) -> None:
+        with self.lock:
+            self.settings = copy.deepcopy(settings)
+            self._persist()
+
+    def set_members(self, members: list[dict[str, Any]]) -> None:
+        with self.lock:
+            self.household["members"] = copy.deepcopy(members)
+            self._persist()
+
+    def clear_all(self) -> None:
+        """Clear local data: household state AND settings/account."""
+        with self.lock:
+            self._init_defaults(self.household_id)
+            self.settings = default_settings()
+            self._persist()
+
     def _init_defaults(self, household_id: str) -> None:
         self.household_id = household_id
         self.policy_version = 1
@@ -224,6 +243,7 @@ class SQLiteStateStore(StateStore):
             "conversations": self.conversations,
             "trust_events": self.trust_events,
             "usage": self.usage,
+            "settings": self.settings,
         }
 
     def _load_or_persist(self) -> None:
@@ -247,6 +267,7 @@ class SQLiteStateStore(StateStore):
             self.conversations = value.get("conversations", {})
             self.trust_events = value.get("trust_events", [])
             self.usage = value.get("usage", {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []})
+            self.settings = {**default_settings(), **value.get("settings", {})}
 
     def _persist(self) -> None:
         payload = json.dumps(self._serialize(), sort_keys=True, separators=(",", ":"))

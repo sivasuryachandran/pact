@@ -17,7 +17,11 @@ from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 
+from . import assistant as routes
 from .addons import GiftCart, VenueBook
+from .providers import nvidia_compare, provider_status
+from .qloo_client import QlooClient, Recommender
+from .settings import LANGUAGES, apply_patch, clean_text, public_view, validate_members
 from .service import PactService
 from .state import SQLiteStateStore, now_iso
 from .tokens import TokenManager
@@ -98,6 +102,7 @@ class SandboxManager:
 
 
 sandboxes = SandboxManager(service.compiler)
+recommender_default = Recommender(QlooClient())
 
 
 def runtime_status(target: PactService | None = None, sandbox_id: str | None = None) -> dict[str, Any]:
@@ -202,7 +207,33 @@ def _surface_text(surface: str, shared: str, private: str) -> str:
     return shared
 
 
-def handle_command(target: PactService, text: str, speaker_id: str, surface: str, conversation_id: str | None = None) -> dict[str, Any]:
+def _venue_booking(target: PactService, speaker: str, role: str, plan: dict[str, Any] | None, conversation: dict[str, Any], conversation_id: str, surface: str, trace: list[str]) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    plan = plan or target.create_plan("Maya's birthday", 15000, "maya", conversation_id)
+    conversation["active_plan_id"] = plan["plan_id"]
+    action = VenueBook().reservation_action(
+        household_id=target.store.household_id,
+        requester=speaker,
+        requester_role=role,
+        plan_id=plan["plan_id"],
+        conversation_id=conversation_id,
+        surface=surface,
+        request_id="venue-" + uuid4_short(),
+        idempotency_key="venue-once-" + uuid4_short(),
+        timestamp=now_iso(),
+    )
+    result = target.check_action(action)
+    trace.append("check_action")
+    approval = None
+    if result["decision"] == "ask":
+        approval = target.request_approval(action, result["decision_token"])
+        trace.append("request_approval")
+        conversation["pending_approval_id"] = approval["approval"]["approval_id"]
+    plan = target.get_plan(plan["plan_id"])
+    text = _surface_text(surface, "VenueBook needs Dad's approval for Maya's $120 birthday reservation.", "VenueBook requests a $120 Funzone reservation for Maya. The exact policy decision is ASK; approve this exact request to hold it against the $150 plan.")
+    return plan, text, {"kind": "decision", "addon": "VenueBook", "action": action, "decision": result, "approval": approval, "plan": plan}
+
+
+def handle_command(target: PactService, text: str, speaker_id: str, surface: str, conversation_id: str | None = None, recommender: Recommender | None = None, session_id: str = "default") -> dict[str, Any]:
     """One typed/voice command pipeline used by the UI and the Maya demo."""
     normalized = " ".join(text.strip().split())
     lower = normalized.lower()
@@ -212,6 +243,8 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
     card: dict[str, Any] = {"kind": "message"}
     plan = target.store.get_plan(conversation.get("active_plan_id")) if conversation.get("active_plan_id") else None
     speaker, role = _member(speaker_id)
+    provider = dict(routes.LOCAL)
+    recommender = recommender or recommender_default
 
     if ("birthday" in lower and "plan" in lower) or ("plan" in lower and "under $150" in lower):
         match = re.search(r"(?:under|below|within)\s*\$?(\d+(?:\.\d{1,2})?)", lower)
@@ -222,30 +255,19 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
         trace.append("create_plan")
         assistant = f"I created Maya's birthday plan with a ${budget / 100:.0f} budget. Which part should VenueBook or GiftCart handle?"
         card = {"kind": "plan", "plan": target.get_plan(plan["plan_id"]), "synthetic_replay": True}
-    elif "book" in lower and ("funzone" in lower or "venue" in lower):
-        plan = plan or target.create_plan("Maya's birthday", 15000, "maya", conversation_id)
-        conversation["active_plan_id"] = plan["plan_id"]
-        action = VenueBook().reservation_action(
-            household_id=target.store.household_id,
-            requester=speaker,
-            requester_role=role,
-            plan_id=plan["plan_id"],
-            conversation_id=conversation_id,
-            surface=surface,
-            request_id="venue-" + uuid4_short(),
-            idempotency_key="venue-once-" + uuid4_short(),
-            timestamp=now_iso(),
-        )
-        result = target.check_action(action)
-        trace.append("check_action")
-        approval = None
-        if result["decision"] == "ask":
-            approval = target.request_approval(action, result["decision_token"])
-            trace.append("request_approval")
-            conversation["pending_approval_id"] = approval["approval"]["approval_id"]
-        plan = target.get_plan(plan["plan_id"])
-        assistant = _surface_text(surface, "VenueBook needs Dad's approval for Maya's $120 birthday reservation.", "VenueBook requests a $120 Funzone reservation for Maya. The exact policy decision is ASK; approve this exact request to hold it against the $150 plan.")
-        card = {"kind": "decision", "addon": "VenueBook", "action": action, "decision": result, "approval": approval, "plan": plan}
+    elif ("book" in lower and ("funzone" in lower or "venue" in lower)) or routes.wants_book_this(lower):
+        suggested = conversation.get("last_recommendation") if routes.wants_book_this(lower) else None
+        if routes.wants_book_this(lower) and not suggested:
+            assistant_text = "Ask me for a recommendation first, then say “book this for us.”"
+            card = {"kind": "message"}
+            assistant_reply = assistant_text
+        else:
+            plan, assistant_reply, card = _venue_booking(target, speaker, role, plan, conversation, conversation_id, surface, trace)
+            if suggested:
+                # The suggestion is context only. The decision above came from PACT policy.
+                card["recommendation"] = {"item": suggested, "suggestion_only": True}
+                assistant_reply = f"{suggested['name']} was suggested. Booking goes through your house rules: " + assistant_reply
+        assistant = assistant_reply
     elif lower in {"approve", "dad approve", "approve it", "yes approve"} or ("approve" in lower and speaker == "siva"):
         approval_id = conversation.get("pending_approval_id")
         approval = target.store.get_approval(approval_id) if approval_id else None
@@ -284,9 +306,16 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
     elif "private" in lower or "private order" in lower:
         assistant = "That’s private." if surface not in {"dad_phone", "personal"} else "Private order details are visible only on Dad's simulated private phone surface."
         card = {"kind": "privacy", "shared_surface": surface not in {"dad_phone", "personal"}, "synthetic_replay": True}
+    elif (info := routes.route(target, lower, speaker, conversation, recommender, session_id)) is not None:
+        assistant_text, card, provider = info["assistant"], info["card"], info["provider"]
+        trace.extend(info["trace"])
+        if info.get("last_recommendation"):
+            conversation["last_recommendation"] = info["last_recommendation"]
+        assistant = assistant_text
     else:
         proposal = target.propose_rule(normalized, speaker)
         trace.append("propose_rule")
+        provider = {"id": "bedrock", "label": "Bedrock"} if "bedrock" in str(proposal.get("compiler", "")) else dict(routes.LOCAL)
         if proposal.get("status") == "candidate":
             assistant = proposal.get("read_back", "I have a candidate rule ready for confirmation.")
             card = {"kind": "rule_candidate", "proposal": proposal, "requires_confirmation": True}
@@ -296,7 +325,7 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
 
     conversation["turns"].append({"speaker_id": speaker_id, "role": role, "surface": surface, "user_text": normalized, "assistant_text": assistant, "trace": trace, "timestamp": now_iso()})
     target.store.save_conversation(conversation)
-    return {"conversation_id": conversation_id, "surface": surface, "speaker_id": speaker_id, "assistant_text": assistant, "card": card, "trace": trace, "trace_label": "PACT tool trace (local calls; not an MCP wire trace)", "transcript": conversation["turns"][-1], "plan": target.get_plan(conversation["active_plan_id"]) if conversation.get("active_plan_id") else None}
+    return {"conversation_id": conversation_id, "surface": surface, "speaker_id": speaker_id, "assistant_text": assistant, "card": card, "trace": trace, "provider": provider, "trace_label": "PACT tool trace (local calls; not an MCP wire trace)", "transcript": conversation["turns"][-1], "plan": target.get_plan(conversation["active_plan_id"]) if conversation.get("active_plan_id") else None}
 
 
 def uuid4_short() -> str:
@@ -472,7 +501,7 @@ async def api_command(request: Request):
     sandbox_id, target, new_cookie = context
     try:
         body = await _json(request)
-        response = JSONResponse(handle_command(target, str(body["text"]), str(body.get("speaker_id", "maya")), str(body.get("surface", "living_room")), body.get("conversation_id")))
+        response = JSONResponse(handle_command(target, str(body["text"]), str(body.get("speaker_id", "maya")), str(body.get("surface", "living_room")), body.get("conversation_id"), recommender_default, sandbox_id))
     except Exception as exc:
         response = _error(exc)
     return _finish(response, sandbox_id, new_cookie)
@@ -482,6 +511,7 @@ async def api_command(request: Request):
 async def api_reset(request: Request):
     sandbox_id, new_cookie = _sandbox_id(request)
     target = sandboxes.reset(sandbox_id)
+    recommender_default.forget(sandbox_id)
     return _finish(JSONResponse({"status": "reset", "sandbox_id": sandbox_id, "storage": "sqlite", "state": target.get_rules()}), sandbox_id, new_cookie)
 
 
@@ -503,6 +533,138 @@ async def api_autonomy(request: Request):
     try:
         body = await _json(request)
         response = JSONResponse(target.autonomy_proposal(str(body.get("action", "")), str(body.get("beneficiary", "")), int(body.get("max_days", 30))))
+    except Exception as exc:
+        response = _error(exc)
+    return _finish(response, sandbox_id, new_cookie)
+
+
+# ---- settings, demo account, providers (per-sandbox; demo only, not production auth) ----
+
+def _settings_payload(sandbox_id: str, target: PactService) -> dict[str, Any]:
+    settings = public_view(target.store.settings)
+    return {
+        "settings": settings,
+        "members": target.store.household.get("members", []),
+        "languages": LANGUAGES,
+        "providers": provider_status(target.compiler.status, recommender_default.client, settings),
+        "account_notice": "Demo account: local sandbox session only. Not production authentication.",
+        "sandbox": {"id_suffix": sandbox_id[-6:]},
+    }
+
+
+def _rotate_cookie(response: Any) -> str:
+    fresh = secrets.token_urlsafe(32)
+    response.set_cookie(SANDBOX_COOKIE, fresh, max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax", secure=os.getenv("PACT_COOKIE_SECURE", "0") == "1", path="/")
+    return fresh
+
+
+@server.custom_route("/api/settings", methods=["GET", "POST"], include_in_schema=False)
+async def api_settings(request: Request):
+    context = _context(request)
+    if isinstance(context, JSONResponse):
+        return context
+    sandbox_id, target, new_cookie = context
+    try:
+        if request.method == "POST":
+            body = await _json(request)
+            with target.store.lock:
+                target.store.update_settings(apply_patch(target.store.settings, body))
+                if "members" in body:
+                    target.store.set_members(validate_members(body["members"]))
+            recommender_default.forget(sandbox_id)
+        response = JSONResponse(_settings_payload(sandbox_id, target))
+    except Exception as exc:
+        response = _error(exc)
+    return _finish(response, sandbox_id, new_cookie)
+
+
+@server.custom_route("/api/session/login", methods=["POST"], include_in_schema=False)
+async def api_login(request: Request):
+    context = _context(request)
+    if isinstance(context, JSONResponse):
+        return context
+    sandbox_id, target, new_cookie = context
+    try:
+        body = await _json(request)
+        display = clean_text(body.get("name"), "name", 40, required=True)
+        settings = public_view(target.store.settings)
+        settings["account"] = {"signed_in": True, "display_name": display, "kind": "Demo account"}
+        target.store.update_settings(settings)
+        response = JSONResponse(_settings_payload(sandbox_id, target))
+    except Exception as exc:
+        response = _error(exc)
+    return _finish(response, sandbox_id, new_cookie)
+
+
+@server.custom_route("/api/session/logout", methods=["POST"], include_in_schema=False)
+async def api_logout(request: Request):
+    """Sign out: the browser gets a brand-new sandbox, so the previous session's data is unreachable from it."""
+    sandbox_id, _ = _sandbox_id(request)
+    recommender_default.forget(sandbox_id)
+    response = JSONResponse({"status": "signed_out"})
+    _rotate_cookie(response)
+    return response
+
+
+@server.custom_route("/api/data/clear", methods=["POST"], include_in_schema=False)
+async def api_clear(request: Request):
+    """Clear local data: household state, settings and account for this browser session, then start a fresh sandbox."""
+    sandbox_id, _ = _sandbox_id(request)
+    with sandboxes.lock:
+        target = sandboxes.services.pop(sandbox_id, None) or sandboxes.get(sandbox_id)
+        sandboxes.services.pop(sandbox_id, None)
+        target.store.clear_all()
+    recommender_default.forget(sandbox_id)
+    response = JSONResponse({"status": "cleared"})
+    _rotate_cookie(response)
+    return response
+
+
+@server.custom_route("/api/providers/test", methods=["POST"], include_in_schema=False)
+async def api_provider_test(request: Request):
+    context = _context(request)
+    if isinstance(context, JSONResponse):
+        return context
+    sandbox_id, target, new_cookie = context
+    try:
+        provider = str((await _json(request)).get("provider", ""))
+        if provider == "qloo":
+            from .qloo_client import QlooError
+            client = recommender_default.client
+            if not getattr(client, "configured", False):
+                result = {"provider": "qloo", "ok": False, "state": "demo", "message": "No QLOO_API_KEY set. Using Demo recommendations."}
+            else:
+                try:
+                    client.fetch("movie", "", 1)
+                    result = {"provider": "qloo", "ok": True, "state": "connected", "message": "Qloo responded."}
+                except QlooError as exc:
+                    result = {"provider": "qloo", "ok": False, "state": "demo", "message": f"Qloo check failed ({exc.reason}). Using Demo recommendations."}
+        elif provider == "nvidia":
+            r = nvidia_compare("Reply with the single word: ready")
+            result = {"provider": "nvidia", "ok": bool(r.get("available")), "state": "connected" if r.get("available") else "unavailable", "message": "NVIDIA Nemotron responded." if r.get("available") else r.get("reason", "Unavailable")}
+        elif provider == "bedrock":
+            status = target.compiler.status
+            result = {"provider": "bedrock", "ok": bool(status.get("available")), "state": "connected" if status.get("available") else "demo", "message": "Bedrock is ready." if status.get("available") else (status.get("reason") or "Deterministic compiler in use.")}
+        else:
+            raise ValueError("unknown provider")
+        response = JSONResponse(result)
+    except Exception as exc:
+        response = _error(exc)
+    return _finish(response, sandbox_id, new_cookie)
+
+
+@server.custom_route("/api/compare", methods=["POST"], include_in_schema=False)
+async def api_compare(request: Request):
+    """Informational NVIDIA Nemotron comparison. Never part of the PACT decision path."""
+    context = _context(request)
+    if isinstance(context, JSONResponse):
+        return context
+    sandbox_id, target, new_cookie = context
+    try:
+        question = str((await _json(request)).get("text", "")).strip()
+        if not question:
+            raise ValueError("text is required")
+        response = JSONResponse(nvidia_compare(question))
     except Exception as exc:
         response = _error(exc)
     return _finish(response, sandbox_id, new_cookie)
@@ -550,3 +712,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

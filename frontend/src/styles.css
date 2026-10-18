@@ -9,3 +9,5 @@
 .candidate .secondary-action,.secondary-action{border:1px solid var(--line-strong);background:#ffffff08;color:var(--muted);font-weight:500}
 .impact-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.impact-grid span{display:grid;gap:4px;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--dim);font:10px ui-monospace,monospace}.impact-grid b{font-size:18px;color:var(--text);font-family:inherit}
 .trust-box{display:grid;gap:9px;margin-top:25px;padding-top:17px;border-top:1px solid var(--line)}.trust-box>div{display:flex;justify-content:space-between;align-items:center}.trust-box strong{font-size:11px;font-weight:500;color:#d3cdfd}.trust-box>span{font:10px ui-monospace,monospace;color:var(--muted)}
+
+.provider-line{display:flex;align-items:center;gap:10px;margin-top:10px}.provider-chip{font:500 10.5px 'Geist Mono Variable',ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:#a1a1aa;border:1px solid #ffffff1f;border-radius:999px;padding:5px 9px}.provider-link{background:none;border:0;color:#a78bfa;text-decoration:underline;font-size:13px}

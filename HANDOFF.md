@@ -230,3 +230,12 @@ AWS permissions; see `reports/deployment-status.md`.
 - Setup: see "Local setup and run" above. Build the UI with `npm install && npm run build`; the Python server serves `web/`.
 - Stitch project for the display screens: `projects/10118988347216740244` (needs your own Stitch API key; keep it in your MCP config, not in the repo).
 - Firefly work left: real-GPU fps check, voice wake-phrase test in Chrome, wire the phone "Deny" button.
+
+## Personalization and settings layer
+
+- `pact/settings.py` (validated per-session settings), `pact/qloo_client.py` (Qloo client, local fallback, mock provider, per-session cache), `pact/providers.py` (provider status, NVIDIA Nemotron comparison), `pact/assistant.py` (time / nearby / recommend routing).
+- New endpoints: `/api/settings`, `/api/session/login|logout`, `/api/data/clear`, `/api/providers/test`, `/api/compare`. `/api/command` now returns `provider`.
+- UI: `frontend/src/Settings.tsx` drawer (Settings button in the nav).
+- Recommendations are suggestions only; "Book this for us" calls the same `check_action` path as VenueBook.
+- Qloo client follows the Qrowd spike (`../Qrowd/spike/results.md`): `/search` to resolve a seed, then `/v2/insights` with `signal.interests.entities` (filter.type alone returns 400). Movie, music and place types were checked live afterwards; place results use `filter.location.query` (signal.location.query is ignored). Place results can include hotels. Set `QLOO_API_BASE_URL` if needed.
+- Tests: `tests/test_personalization.py` (23 tests). Full suite: `.venv/bin/python -m pytest -q`.

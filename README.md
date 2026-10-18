@@ -46,6 +46,74 @@ and SQLite state (`PACT_SQLITE_PATH`, default `pact-data.sqlite3`). Rules,
 plans, approvals, receipts, conversations, and trust history are isolated per
 sandbox. **Reset sandbox** deletes the current demo state and starts clean.
 
+## Setup after cloning
+
+You must provide your own credentials. None are included in this repository, and
+PACT runs fully without any of them (local mode).
+
+```bash
+git clone https://github.com/sivasuryachandran/pact.git && cd pact
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm install && npm run build                 # builds the UI into web/
+cp .env.example .env                         # then edit .env with YOUR values
+set -a; source .env; set +a                  # the server reads environment variables, not .env itself
+.venv/bin/python -m pact.server              # http://127.0.0.1:8787
+```
+
+`.env` is git-ignored. Never paste keys into source files, issues or chat.
+
+| Provider | Purpose | Required | Fallback |
+|---|---|---|---|
+| Bedrock | Rule compilation | Recommended | Deterministic compiler |
+| Qloo | Personalization | Optional | Local recommendations |
+| NVIDIA Nemotron | Comparison only | Optional | No comparison mode |
+| AWS credentials | Bedrock access | Optional for fallback mode | Local mode |
+
+### Amazon Bedrock
+Configure AWS credentials with the normal SDK chain (for example `aws configure --profile pact`
+or SSO), then set `AWS_PROFILE`, `PACT_AWS_REGION` (for example `us-west-2`),
+`PACT_BEDROCK_ENABLED=1` and `PACT_BEDROCK_MODEL_ID` (for example `amazon.nova-lite-v1:0`) and
+make sure the model is enabled for your account in that Region. Bedrock only compiles rule wording; it
+never decides policy.
+
+### Qloo (optional)
+Get a key from Qloo and set `QLOO_API_KEY`. Qloo ranks movies, music, restaurants and activities only.
+It is never used for authentication, policy, approvals, time or facts. The client uses `GET /search` to resolve a seed taste and `GET /v2/insights` with `signal.interests.entities`
+(host `https://hackathon.api.qloo.com`, header `X-Api-Key`), as verified in the Qrowd project's live spike for brand and
+artist types. Movie, music and place types were then checked live (places use `filter.location.query` for the city). For another host set `QLOO_API_BASE_URL`. Without a key, on a timeout or on an invalid response, PACT
+shows **Demo recommendations** from a built-in local list.
+
+### NVIDIA Nemotron (optional, comparison only)
+Set `NVIDIA_API_KEY`, `NVIDIA_MODEL_ID` and (if needed) `NVIDIA_API_BASE_URL` (an OpenAI-compatible
+endpoint; the default is NVIDIA's hosted API). Nemotron is an NVIDIA model, not an Amazon model. It can answer a
+question you send to `POST /api/compare` for side-by-side reading and is never part of any PACT decision.
+
+### Privacy and data flow
+- Settings (name, location, timezone, language, toggles) are stored in your browser session's local SQLite sandbox only.
+- "What time is it?" is answered from your saved timezone, locally. No provider is involved.
+- Qloo receives recommendation context only: a category (and your city for places). Coordinates are sent
+  only if you turn on "Share coordinates". It never receives PACT rules, approvals, tokens or receipts.
+- Bedrock receives the rule wording you type. Nemotron receives only what you explicitly send to compare.
+- Location is never read from your device unless you press "Use my location" and allow the browser prompt.
+- Keys are read from the environment, never returned by the API, shown in the UI or written to logs.
+
+### Demo account limits
+The Settings "Demo account" is a name stored in a local sandbox session. It is not production
+authentication: there are no passwords, no verified identity, and signing out simply gives the browser a
+fresh sandbox. Do not enter real personal data.
+
+### Fallback behavior
+No Bedrock credentials: deterministic compiler. No Qloo key or Qloo error: Demo recommendations. No NVIDIA key: no
+comparison mode. Missing location or timezone: PACT asks once, then points to Settings. The UI shows which source
+answered: Bedrock, Qloo, Demo recommendations, Local demo or NVIDIA Nemotron comparison.
+
+### Troubleshooting
+- `/api/status` or Settings shows **Demo mode** for Bedrock: check `PACT_BEDROCK_ENABLED=1`, the profile, Region and model access.
+- Qloo shows **Demo mode**: the key is missing or failed; press *Test connection* in Settings for the reason (never the key).
+- Browser gets 403 on assets or API: the origin guard only allows `127.0.0.1:8787`/`:3000`; add others with `PACT_ALLOWED_ORIGINS`.
+- Voice does nothing: use Chrome, allow the microphone, and check Voice is on in Settings. Typed input always works.
+
 ## Real Bedrock
 
 Use the normal AWS SDK profile/environment credential chain. The overnight
