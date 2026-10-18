@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from . import assistant as routes
+from .activity_taxonomy import VALIDATED_AT, VALIDATION_CITY, public_groups
 from .addons import GiftCart, VenueBook
 from .providers import nvidia_compare, provider_status
 from .qloo_client import QlooClient, Recommender
@@ -618,6 +619,12 @@ async def api_clear(request: Request):
     response = JSONResponse({"status": "cleared"})
     _rotate_cookie(response)
     return response
+
+
+@server.custom_route("/api/activity-categories", methods=["GET"], include_in_schema=False)
+async def api_activity_categories(request: Request):
+    """Public activity groups that passed live validation. No Qloo tag ids are exposed."""
+    return JSONResponse({"categories": [g for g in public_groups() if g["in_ui"]], "validated_at": VALIDATED_AT, "validated_in": VALIDATION_CITY})
 
 
 @server.custom_route("/api/providers/test", methods=["POST"], include_in_schema=False)

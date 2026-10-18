@@ -86,45 +86,49 @@ shows **Demo recommendations** from a built-in local list.
 
 ### Activity recommendations (location-aware)
 
-PACT supports location-aware activity recommendations through Qloo. The first live validation used amusement parks, but amusement parks are only one supported category—not the definition of activities. The integration is designed to support museums, parks, zoos, theaters, bowling, golf, concerts, escape rooms, classes, family attractions, and other verified Qloo categories. Each category must be validated against the live API before being described as supported.
+PACT supports location-aware activity recommendations through Qloo. The first live validation used amusement parks, but amusement parks are only one supported category, not the definition of activities. Qloo exposes a large, dynamic taxonomy of place categories, so the lists below are not exhaustive. API taxonomy support is not the same as useful local results: a valid tag can still return nothing, malls, hotels or casinos for a given city. Each category is therefore validated against the live API before PACT describes it as supported.
 
-Ask for a category ("museums near me") or leave it open ("what is there to do near me?"), which searches a mixed set
-(museums, parks, theaters, bowling, outdoor recreation, amusement parks). An unverified category such as cooking
-classes never guesses a tag: PACT says it can't verify it yet and shows **Demo recommendations**.
+**How a search works.** PACT resolves a seed taste with `GET /search`, then calls `GET /v2/insights` with `filter.type=urn:entity:place`, `signal.interests.entities`, `filter.tags` (comma-separated tags are an OR) and **`filter.location.query=<plain city name>`**. The location parameter was re-probed live: `filter.location.query` (and `filter.location` with a point and radius) restricts results to San Jose and nearby cities, while `signal.location.query` and `signal.location` do not (they returned New York, Las Vegas and others). The city must be plain: "San Jose, CA" returns zero results, so PACT strips the state.
 
-Live check against the Qloo hackathon API, location "San Jose" (one request per tag, `take=10`, one shared seed
-taste; "located" = at least two thirds of results are in the Bay Area):
+**Public categories** (what people see; raw tag ids are never shown): Museums & culture, Parks & outdoors, Sports & games, Family activities, Movies & theaters, Classes & workshops. Each group searches only its VERIFIED tags. With no category, PACT searches a reliable mix (museums, theaters, parks, hiking, bowling, golf), never amusement parks alone. THIN categories (zoos, playgrounds, escape rooms, art studios and galleries, nature preserves, concerts) work only when asked for explicitly and PACT says local availability is limited. Hidden categories (Live events, tourist attractions, cooking classes, workshops, pottery, aquariums, trail heads) answer: "I couldn’t verify enough nearby results for that category. Try another activity type or enable demo recommendations." and show Demo recommendations.
 
-| Category | Qloo tag | San Jose live status | Example results |
-|---|---|---|---|
-| Museums | `urn:tag:category:place:museum` | VERIFIED LIVE | Winchester Mystery House; Rosicrucian Egyptian Museum; San Jose Museum of Quilts & Textiles |
-| Parks | `urn:tag:category:place:park` | VERIFIED LIVE | Monopoly in the Park; Calero County Park; Alviso Marina County Park |
-| Zoos | `urn:tag:category:place:zoo` | VERIFIED LIVE (1 result) | Happy Hollow Park & Zoo |
-| Theaters (performing arts) | `urn:tag:category:place:performing_arts_theater` | VERIFIED LIVE | San Jose Center for the Performing Arts; Montgomery Theater; San Jose Stage |
-| Movie theaters | `urn:tag:category:place:movie_theater` | VERIFIED LIVE (mixed quality: returns malls) | Westfield Valley Fair; Eastridge Center; AMC Saratoga 14 |
-| Bowling | `urn:tag:category:place:bowling_alley` | VERIFIED LIVE | 4th Street Bowl; San Pedro Social; Bowlmor Cupertino |
-| Golf | `urn:tag:category:place:golf_course` | VERIFIED LIVE | Topgolf; Boulder Ridge Golf Club; Los Lagos Golf Course |
-| Concerts (concert hall) | `urn:tag:category:place:concert_hall` | VERIFIED LIVE (1 result) | San Jose Center for the Performing Arts |
-| Music venues | `urn:tag:setting:qloo:music_venue` | NOT VERIFIED (a setting tag, not a place category; 1 result) | PETE BE Center |
-| Escape rooms | `urn:tag:category:place:escape_room_center` | VERIFIED LIVE (1 result) | Beat The Lock Escape Room |
-| Tourist attractions | `urn:tag:category:place:tourist_attraction` | VERIFIED LIVE (not family-specific; returned a casino) | Casino M8trix; Winchester Mystery House; Monopoly in the Park |
-| Family attractions | none | NOT VERIFIED (no family-specific tag tested) | none |
-| Art studios | `urn:tag:category:place:art_studio` | VERIFIED LIVE (1 result) | MACLA/Movimiento de Arte y Cultura Latino Americana |
-| Classes (cooking) | `urn:tag:category:place:cooking_class` | NOT VERIFIED (0 results) | none |
-| Workshops | `urn:tag:category:place:workshop` | NOT VERIFIED (0 results) | none |
-| Outdoor recreation (hiking areas) | `urn:tag:category:place:hiking_area` | VERIFIED LIVE | Calero County Park; Alviso Marina County Park; Rancho Cañada del Oro Open Space Preserve |
-| Nature preserves | `urn:tag:category:place:nature_preserve` | VERIFIED LIVE (1 result) | Rancho Cañada del Oro Open Space Preserve |
-| Aquariums | `urn:tag:category:place:aquarium` | NOT VERIFIED (0 results) | none |
-| Playgrounds | `urn:tag:category:place:playground` | VERIFIED LIVE (1 result) | Rotary PlayGarden |
-| Amusement parks | `urn:tag:category:place:amusement_park` | VERIFIED LIVE | California's Great America; Happy Hollow Park & Zoo; Golfland San Jose |
-| Any category when Qloo is off, keyless or failing | n/a | DEMO FALLBACK | Funzone Arcade; Riverside Mini Golf; City Science Museum |
+Quality filter: results whose own category tags show a mall, department or clothing store, casino or hotel are dropped unless that is the category being searched. This is what makes Movies & theaters usable.
 
-Results are live samples from one run, not a guarantee; Qloo data changes. Only VERIFIED LIVE categories are enabled in code.
+Classification: VERIFIED = at least 3 relevant local results; THIN = 1 or 2; IRRELEVANT = results include malls, hotels, casinos or unrelated places; NOT VERIFIED = no usable result or tag not confirmed. Live run on 2026-10-18, location "San Jose", `take=10`:
 
-Qloo only provides optional personalization. Qloo never makes allow/ask/deny decisions. PACT policy enforcement
-always runs after recommendations: "Book this for us" calls the same `check_action` path as any other booking.
-QROWD code, data, scoring, and catalog are not used by PACT. The only thing carried over is the checked-in knowledge
-of which Qloo endpoints and parameters work.
+| Category tested | Public group | Qloo tag | San Jose result | First results |
+|---|---|---|---|---|
+| museums | Museums & culture | `urn:tag:category:place:museum` | VERIFIED: 4 relevant | Winchester Mystery House; Rosicrucian Egyptian Museum; San Jose Museum of Quilts & Textiles |
+| art studios | Museums & culture | `urn:tag:category:place:art_studio` | THIN: 1 result | MACLA/Movimiento de Arte y Cultura Latino Americana |
+| art galleries | Museums & culture | `urn:tag:category:place:art_gallery` | THIN: 2 results | Empire Seven Studios; MACLA/Movimiento de Arte y Cultura Latino Americana |
+| theaters | Museums & culture | `urn:tag:category:place:performing_arts_theater` | VERIFIED: 6 relevant | San Jose Center for the Performing Arts; Montgomery Theater; San Jose Stage |
+| theaters (alt) | Museums & culture | `urn:tag:category:place:performing_arts` | NOT VERIFIED: 0 results (performing_arts tag) | none |
+| movie theaters | Movies & theaters | `urn:tag:category:place:movie_theater` | VERIFIED with quality filter: 7 raw, 2 malls removed, 5 cinemas; raw result set was IRRELEVANT | Pruneyard Cinemas; AMC Saratoga 14; Cinemark CinéArts Santana Row (malls Westfield Valley Fair and Eastridge Center filtered out) |
+| parks | Parks & outdoors | `urn:tag:category:place:park` | VERIFIED: 10 relevant | Monopoly in the Park; Calero County Park; Alviso Marina County Park |
+| nature preserves | Parks & outdoors | `urn:tag:category:place:nature_preserve` | THIN: 1 result | Rancho Cañada del Oro Open Space Preserve |
+| hiking | Parks & outdoors | `urn:tag:category:place:hiking_area` | VERIFIED: 3 relevant | Calero County Park; Alviso Marina County Park; Rancho Cañada del Oro Open Space Preserve |
+| trail heads | Parks & outdoors | `urn:tag:category:place:trail_head` | NOT VERIFIED: 0 results | none |
+| bowling | Sports & games | `urn:tag:category:place:bowling_alley` | VERIFIED: 6 relevant | 4th Street Bowl; San Pedro Social; Bowlmor Cupertino |
+| golf | Sports & games | `urn:tag:category:place:golf_course` | VERIFIED: 9 relevant | Topgolf; Boulder Ridge Golf Club; Los Lagos Golf Course |
+| escape rooms | Sports & games | `urn:tag:category:place:escape_room_center` | THIN: 1 result | Beat The Lock Escape Room |
+| zoos | Family activities | `urn:tag:category:place:zoo` | THIN: 1 result | Happy Hollow Park & Zoo |
+| playgrounds | Family activities | `urn:tag:category:place:playground` | THIN: 1 result | Rotary PlayGarden |
+| amusement parks | Family activities | `urn:tag:category:place:amusement_park` | VERIFIED: 3 relevant | California's Great America; Happy Hollow Park & Zoo; Golfland San Jose |
+| aquariums | Family activities | `urn:tag:category:place:aquarium` | NOT VERIFIED: 0 results | none |
+| concerts | Live events | `urn:tag:category:place:concert_hall` | THIN: 1 result | San Jose Center for the Performing Arts |
+| music venues | Live events | `urn:tag:category:place:live_music_venue` | IRRELEVANT: 10 results were bars, restaurants and a market | ENSO Bar & Nightclub; Tessora's Barra di Vino.. As of Jan 16, 2025 Tessoras is under new management; San Pedro Square Market |
+| cooking classes | Classes & workshops | `urn:tag:category:place:cooking_class` | NOT VERIFIED: 0 results | none |
+| workshops | Classes & workshops | `urn:tag:category:place:workshop` | NOT VERIFIED: 0 results | none |
+| pottery classes | Classes & workshops | `urn:tag:category:place:pottery_classes` | NOT VERIFIED: 0 results | none |
+| dance schools | Classes & workshops | `urn:tag:category:place:dance_school` | VERIFIED: 3 relevant | On One Studios; Purdance; Nor Cal Dance Arts |
+| craft | Classes & workshops | `urn:tag:category:place:craft` | NOT VERIFIED: 0 results | none |
+| tourist attractions | Attractions | `urn:tag:category:place:tourist_attraction` | IRRELEVANT: 10 results included a casino | Casino M8trix; Winchester Mystery House; Monopoly in the Park |
+
+Notes: "Classes & workshops" currently means dance schools only (cooking classes, workshops, pottery and craft returned nothing; yoga and martial arts returned gyms and a school and were not adopted). Results are one live sample, not a guarantee; Qloo data changes, so re-validate a category (and the other cities you care about) before relying on it. Other cities were not tested.
+
+The UI shows category chips only for groups with VERIFIED results (Museums & culture, Parks & outdoors, Sports & games, Family activities, Classes & workshops; Live events stays hidden). Each result shows the category searched, the location searched, **Qloo-powered** or **Demo recommendation**, a "Limited local results" note when applicable, and, if you then ask to book, the PACT policy decision.
+
+Qloo is only a personalization and recommendation provider. Qloo never decides allow, ask or deny, and PACT policy enforcement always runs after a recommendation ("Book this for us" calls the same `check_action` path as any other booking). QROWD is a separate, unrelated project: no QROWD code, data, scoring or catalog is used by PACT.
 
 ### NVIDIA Nemotron (optional, comparison only)
 Set `NVIDIA_API_KEY`, `NVIDIA_MODEL_ID` and (if needed) `NVIDIA_API_BASE_URL` (an OpenAI-compatible

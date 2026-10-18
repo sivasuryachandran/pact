@@ -21,49 +21,11 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
+from .activity_taxonomy import (IRRELEVANT, NOT_VERIFIED, THIN, general_plan, is_unrelated_place, normalize_city, resolve, same_city)
+
 DEFAULT_BASE_URL = "https://hackathon.api.qloo.com"
 DEFAULT_SEEDS = {"movie": "Inside Out", "music": "Khruangbin", "restaurant": "Chipotle", "activity": "Dave & Buster's"}
 RESTAURANT_TAG = "urn:tag:category:place:restaurant"  # verified live
-
-# Activity categories. ONLY categories whose live San Jose request succeeded with usable, located
-# results are listed. Others (cooking classes, workshops, aquariums, family-specific) are NOT VERIFIED
-# and are deliberately absent. Amusement parks are one entry, not the definition of "activities".
-ACTIVITY_CATEGORIES: dict[str, str] = {
-    "museums": "urn:tag:category:place:museum",
-    "parks": "urn:tag:category:place:park",
-    "zoos": "urn:tag:category:place:zoo",
-    "theaters": "urn:tag:category:place:performing_arts_theater",
-    "movie theaters": "urn:tag:category:place:movie_theater",
-    "bowling": "urn:tag:category:place:bowling_alley",
-    "golf": "urn:tag:category:place:golf_course",
-    "concerts": "urn:tag:category:place:concert_hall",
-    "escape rooms": "urn:tag:category:place:escape_room_center",
-    "attractions": "urn:tag:category:place:tourist_attraction",
-    "art studios": "urn:tag:category:place:art_studio",
-    "outdoor recreation": "urn:tag:category:place:hiking_area",
-    "nature preserves": "urn:tag:category:place:nature_preserve",
-    "playgrounds": "urn:tag:category:place:playground",
-    "amusement parks": "urn:tag:category:place:amusement_park",
-}
-# Used when no category is given: a mixed, curated set (Qloo treats comma-separated tags as OR; verified live).
-# "attractions" is excluded: that tag surfaced a casino for San Jose, which is not household-friendly.
-GENERAL_ACTIVITY = ("museums", "parks", "theaters", "bowling", "outdoor recreation", "amusement parks")
-CATEGORY_ALIASES = {
-    "museum": "museums", "park": "parks", "zoo": "zoos", "theater": "theaters", "theatre": "theaters", "theatres": "theaters",
-    "plays": "theaters", "movie theater": "movie theaters", "cinema": "movie theaters", "cinemas": "movie theaters",
-    "bowl": "bowling", "bowling alley": "bowling", "golf course": "golf", "mini golf": "golf", "concert": "concerts", "live music": "concerts",
-    "escape room": "escape rooms", "attraction": "attractions", "tourist attractions": "attractions", "art studio": "art studios",
-    "hiking": "outdoor recreation", "outdoors": "outdoor recreation", "outdoor": "outdoor recreation", "trails": "outdoor recreation",
-    "nature preserve": "nature preserves", "playground": "playgrounds", "amusement park": "amusement parks", "theme park": "amusement parks", "theme parks": "amusement parks",
-}
-
-
-def resolve_activity_category(name: str | None) -> str | None:
-    """Canonical verified category for a free-text name, or None when it is not a verified category."""
-    key = (name or "").strip().lower()
-    key = CATEGORY_ALIASES.get(key, key)
-    return key if key in ACTIVITY_CATEGORIES else None
-
 KINDS = {
     "movie": "urn:entity:movie",
     "music": "urn:entity:artist",
@@ -117,7 +79,9 @@ def validate_response(payload: Any, limit: int = 5) -> list[dict[str, Any]]:
         affinity = query.get("affinity")
         score = round(float(affinity), 3) if isinstance(affinity, (int, float)) and not isinstance(affinity, bool) and 0 <= affinity <= 1 else None
         desc = entity.get("properties", {}).get("short_description") if isinstance(entity.get("properties"), dict) else None
-        items.append({"name": name.strip(), "reason": desc.strip()[:160] if isinstance(desc, str) else "Matches your taste profile", "score": score})
+        geo = entity.get("properties", {}).get("geocode") if isinstance(entity.get("properties"), dict) else None
+        city = geo.get("city") if isinstance(geo, dict) and isinstance(geo.get("city"), str) else None
+        items.append({"name": name.strip(), "reason": desc.strip()[:160] if isinstance(desc, str) else "Matches your taste profile", "score": score, "city": city})
         if len(items) >= limit:
             break
     if not items:
@@ -170,26 +134,37 @@ class QlooClient:
         if not self._key:
             raise QlooError("missing_key")
         urn = KINDS.get(kind, KINDS["movie"])
+        place = kind in {"restaurant", "activity"}
+        tags: list[str] = []
+        if kind == "restaurant":
+            tags = [RESTAURANT_TAG]
+        elif kind == "activity":
+            plan = resolve(activity_category) if activity_category else general_plan()
+            if plan is None:
+                raise QlooError("unknown_category")
+            if not plan["tags"]:
+                raise QlooError("unverified_category")
+            tags = plan["tags"]
         seed = next((s for s in (seeds or []) if s.strip()), None) or DEFAULT_SEEDS.get(kind, DEFAULT_SEEDS["movie"])
-        found = self._get("/search", {"query": seed[:80], "types": "urn:entity:brand" if urn == "urn:entity:place" else urn})  # brand seeds resolve to a useful taste, not one random venue
+        found = self._get("/search", {"query": seed[:80], "types": "urn:entity:brand" if place else urn})  # brand seeds resolve to a taste, not one random venue
         results = found.get("results") if isinstance(found, dict) else None
         seed_id = results[0].get("entity_id") if isinstance(results, list) and results and isinstance(results[0], dict) else None
         if not isinstance(seed_id, str) or not seed_id:
             raise QlooError("invalid_response")
-        params = {"filter.type": urn, "signal.interests.entities": seed_id, "take": str(limit + 1)}
-        if kind in {"restaurant", "activity"}:
-            if kind == "restaurant":
-                params["filter.tags"] = RESTAURANT_TAG
-            elif activity_category:
-                tag = ACTIVITY_CATEGORIES.get(activity_category)
-                if not tag:
-                    raise QlooError("unknown_category")
-                params["filter.tags"] = tag
-            else:
-                params["filter.tags"] = ",".join(ACTIVITY_CATEGORIES[c] for c in GENERAL_ACTIVITY)
-        if city and kind in {"restaurant", "activity"}:
-            params["filter.location.query"] = city  # verified live: restricts places to the city (signal.location.query does not)
-        items = validate_response(self._get("/v2/insights", params), limit + 1)
+        params = {"filter.type": urn, "signal.interests.entities": seed_id, "take": str(limit + 1 if not place else 10)}
+        where = normalize_city(city) if place else ""
+        if place:
+            params["filter.tags"] = ",".join(tags)  # comma = OR (verified live)
+            if where:
+                params["filter.location.query"] = where  # verified live: plain city name; signal.location.query is ignored
+        payload = self._get("/v2/insights", params)
+        if place and isinstance(payload, dict) and isinstance(payload.get("results"), dict) and isinstance(payload["results"].get("entities"), list):
+            entities = [e for e in payload["results"]["entities"] if isinstance(e, dict) and not is_unrelated_place(e, tags)]
+            cities = [e["properties"]["geocode"]["city"] for e in entities if isinstance(e.get("properties"), dict) and isinstance(e["properties"].get("geocode"), dict) and isinstance(e["properties"]["geocode"].get("city"), str)]
+            if where and cities and not any(same_city(c, where) for c in cities):
+                raise QlooError("location_mismatch")  # Qloo answered, but not for the city that was asked for
+            payload = {**payload, "results": {**payload["results"], "entities": entities}}
+        items = validate_response(payload, limit + 1)
         return [i for i in items if i["name"].lower() != seed.lower()][:limit] or items[:limit]
 
 
@@ -221,23 +196,27 @@ class Recommender:
 
     def recommend(self, session_id: str, kind: str, *, enabled: bool, personalization: bool, city: str = "", interests: list[str] | None = None, limit: int = 3, activity_category: str | None = None) -> dict[str, Any]:
         kind = kind if kind in KINDS else "movie"
-        category = None
+        plan = None
+        where = normalize_city(city) if city else ""
         if kind == "activity" and activity_category:
-            category = resolve_activity_category(activity_category)
-            if category is None:  # unverified or unknown: never guess a tag, never widen silently
-                result = {"provider": PROVIDER_LOCAL, "label": LABELS[PROVIDER_LOCAL], "kind": kind, "category": None, "requested_category": str(activity_category)[:40], "items": local_recommendations(kind, interests, limit), "note": "unknown_category"}
+            plan = resolve(activity_category)
+            if plan is None or plan["status"] in (IRRELEVANT, NOT_VERIFIED):
+                # unknown, hidden or unverified: never guess a tag and never widen silently
+                note = "unknown_category" if plan is None else "unverified_category"
+                result = {"provider": PROVIDER_LOCAL, "label": LABELS[PROVIDER_LOCAL], "kind": kind, "category": None, "requested_category": str(activity_category)[:40], "location": where, "limited": True, "items": local_recommendations(kind, interests, limit), "note": note}
                 return {**result, "cached": False}
+        category = plan["label"] if plan else None
         interests = interests if personalization else []
         use_qloo = enabled and personalization and getattr(self.client, "configured", False)
-        key = (session_id, kind + ":" + (category or "general" if kind == "activity" else ""), city.lower() if use_qloo else "|".join(interests or []).lower(), "q" if use_qloo else "l")
+        key = (session_id, kind + ":" + ((category or "general") if kind == "activity" else ""), city.lower() if use_qloo else "|".join(interests or []).lower(), "q" if use_qloo else "l")
         hit = self._cache.get(key)
         if hit and self._clock() - hit[0] < self.TTL:
             return {**hit[1], "cached": True}
         note = None
         if use_qloo:
             try:
-                items = self.client.fetch(kind, city, limit, interests or None, category)
-                result = {"provider": PROVIDER_QLOO, "label": LABELS[PROVIDER_QLOO], "kind": kind, "category": category, "items": items[:limit], "note": None}
+                items = self.client.fetch(kind, city, limit, interests or None, activity_category)
+                result = {"provider": PROVIDER_QLOO, "label": LABELS[PROVIDER_QLOO], "kind": kind, "category": category, "location": where, "limited": bool(plan and plan["status"] == THIN) or len(items) < 3, "items": items[:limit], "note": None}
                 self._cache[key] = (self._clock(), result)
                 return {**result, "cached": False}
             except QlooError as exc:
@@ -250,7 +229,7 @@ class Recommender:
             note = "personalization_off"
         else:
             note = "missing_key"
-        result = {"provider": PROVIDER_LOCAL, "label": LABELS[PROVIDER_LOCAL], "kind": kind, "category": category, "items": local_recommendations(kind, interests, limit), "note": note}
+        result = {"provider": PROVIDER_LOCAL, "label": LABELS[PROVIDER_LOCAL], "kind": kind, "category": category, "location": where, "limited": False, "items": local_recommendations(kind, interests, limit), "note": note}
         if note in {"missing_key", "disabled", "personalization_off"}:  # transient errors are retried next time
             self._cache[key] = (self._clock(), result)
         return {**result, "cached": False}

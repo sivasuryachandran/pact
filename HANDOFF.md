@@ -240,12 +240,18 @@ AWS permissions; see `reports/deployment-status.md`.
 - Qloo client follows the Qrowd spike (`../Qrowd/spike/results.md`): `/search` to resolve a seed, then `/v2/insights` with `signal.interests.entities` (filter.type alone returns 400). Movie, music and place types were checked live afterwards; place results use `filter.location.query` (signal.location.query is ignored). Place results can include hotels. Set `QLOO_API_BASE_URL` if needed.
 - Tests: `tests/test_personalization.py` (23 tests). Full suite: `.venv/bin/python -m pytest -q`.
 
-## Qloo activity categories (live check, San Jose)
+## Qloo activity taxonomy (validated, San Jose, 2026-10-18)
 
-- **Tested (19 requests, one per tag):** museums, parks, zoos, theaters (performing arts), movie theaters, bowling, golf, concert hall, music venues, escape rooms, tourist attractions, cooking classes, workshops, art studios, hiking areas, nature preserves, aquariums, playgrounds, amusement parks. Tags came from `GET /v2/tags?filter.query=…&filter.parents.types=urn:entity:place`, not guesses.
-- **VERIFIED LIVE and enabled in code (`ACTIVITY_CATEGORIES`):** museums, parks, zoos, theaters, movie theaters, bowling, golf, concerts, escape rooms, tourist attractions, art studios, outdoor recreation (hiking area), nature preserves, playgrounds, amusement parks. Thin (1 result): zoos, concerts, escape rooms, art studios, nature preserves, playgrounds.
-- **NOT VERIFIED, not enabled:** cooking classes, workshops and aquariums (request succeeded, 0 results in San Jose); music venues (only a setting tag, 1 result); family attractions (no family-specific tag tested). Unknown or unverified categories fall back to Demo recommendations and say so.
-- **Quality notes:** movie_theater returns malls; tourist_attraction returned a casino, so it is not in the general mix.
-- **Code changes:** `pact/qloo_client.py` (`ACTIVITY_CATEGORIES`, `GENERAL_ACTIVITY`, aliases, `activity_category` parameter, per-category cache key, `unknown_category` fallback), `pact/assistant.py` (category detection and honest scope text), `tests/test_personalization.py` (+8 tests), README table. Comma-separated `filter.tags` is OR (verified live), used for the general mix. Location uses `filter.location.query`; place requests seed from a brand entity.
-- **Commands:** tag discovery and per-tag probes were small Python scripts run from the scratchpad with `QLOO_API_KEY` passed as an inline environment variable for that one command; no raw responses were saved to the repo. Results: `/v2/tags`, `/search`, `/v2/insights`.
-- **Secrets:** the key was never printed, written to a file, or committed (diff scanned; see commit).
+- **Code:** `pact/activity_taxonomy.py` (registry of categories, public groups, aliases, quality filter, city normalisation), `pact/qloo_client.py` (`fetch(..., activity_category)`, comma-OR tags, location mismatch check, `city`/`limited`/`location` in results), `pact/assistant.py` (category detection, honest wording), `/api/activity-categories` (public groups only), UI category chips and result chips in `frontend/src/App.tsx`. Tests: `tests/test_personalization.py` (activity section).
+- **Verified location parameter:** `filter.location.query` with a plain city name (also `filter.location` point + radius). `signal.location.query`, `signal.location` and `signal.location.radius` are ignored. "San Jose, CA" returns 0, so the state is stripped.
+- **Discovery:** exact tag ids came from `GET /v2/tags?filter.query=<term>&filter.parents.types=urn:entity:place`. 54 `urn:tag:category:place:*` candidates were discovered across the groups; 25 tags were tested (full table in README).
+- **VERIFIED (>=3 relevant):** museums (4), theaters/performing arts (6), parks (10), hiking areas (3), bowling (6), golf (9), amusement parks (3), dance schools (3), movie theaters only with the quality filter (5 cinemas after removing malls).
+- **THIN (1-2, explicit request only, "limited" caveat):** art studios, art galleries, nature preserves, escape rooms, zoos, playgrounds, concerts.
+- **IRRELEVANT (hidden):** music venues (`live_music_venue`: bars, restaurants, a market), tourist attractions (included a casino).
+- **NOT VERIFIED (hidden):** cooking classes, workshops, pottery classes, craft, aquariums, trail heads, performing_arts (0 results each).
+- **Exposed publicly:** Museums & culture, Parks & outdoors, Sports & games, Family activities, Movies & theaters, Classes & workshops (dance schools only). UI chips exclude Movies & theaters (movies have their own path). **Hidden:** Live events, Attractions.
+- **Not in the default mix:** amusement parks, tourist attractions, movie theaters and every THIN category.
+- **Not yet tested:** other cities. Yoga and martial-arts tags were looked at (gyms, one school) and not adopted.
+- **Policy:** unchanged. Qloo only suggests; "Book this for us" still runs `check_action` (ask for the $120 VenueBook booking).
+- **Commands:** tag discovery, per-tag and location probes were short Python scripts run from the scratchpad with `QLOO_API_KEY` passed inline for that command only. No raw responses or keys were saved. Verify with `.venv/bin/python -m pytest -q` (tests use fake transports, no network).
+- **Secrets:** the key was never printed, written or committed (diff scanned before the commit).

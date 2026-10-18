@@ -67,7 +67,7 @@ def test_qloo_timeout_uses_fallback_and_retries():
 
 def test_qloo_response_validation():
     good = {"results": {"entities": [{"name": "Arrival", "query": {"affinity": 0.93}, "properties": {"short_description": "Sci-fi"}}, {"name": ""}, "junk"]}}
-    assert validate_response(good) == [{"name": "Arrival", "reason": "Sci-fi", "score": 0.93}]
+    assert validate_response(good) == [{"name": "Arrival", "reason": "Sci-fi", "score": 0.93, "city": None}]
     for bad in (None, [], {"results": []}, {"results": {"entities": "x"}}, {"results": {"entities": [{"name": 5}]}}):
         with pytest.raises(QlooError):
             validate_response(bad)
@@ -287,12 +287,18 @@ def test_qloo_400_and_unresolvable_seed_fall_back():
     assert out["provider"] == "local" and out["note"] == "http_error"
 
 
-# ---- activity categories ----
+# ---- activity taxonomy ----
 
-from pact.qloo_client import ACTIVITY_CATEGORIES, GENERAL_ACTIVITY, resolve_activity_category  # noqa: E402
+from urllib.parse import parse_qs, urlparse  # noqa: E402
+
+from pact import activity_taxonomy as tax  # noqa: E402
 
 
-def _recording_client(urls):
+def _entity(name, city="San Jose", cats=()):
+    return {"name": name, "query": {"affinity": 0.9}, "properties": {"geocode": {"city": city}}, "tags": [{"id": tax.P + c} for c in cats]}
+
+
+def _client(entities, urls=None):
     class Resp:
         def __init__(self, body): self.body = body
         def __enter__(self): return self
@@ -300,79 +306,159 @@ def _recording_client(urls):
         def read(self, n): return json.dumps(self.body).encode()
 
     def opener(req, timeout):
-        urls.append(req.full_url)
+        if urls is not None:
+            urls.append(req.full_url)
         if "/search" in req.full_url:
             return Resp({"results": [{"name": "Seed", "entity_id": "SEED-9"}]})
-        return Resp({"success": True, "results": {"entities": [{"name": "Rosicrucian Egyptian Museum", "query": {"affinity": 0.9}}]}})
+        return Resp({"success": True, "results": {"entities": entities}})
 
-    return QlooClient(api_key=SECRET, opener=opener)
+    return QlooClient(api_key=SECRET, opener=opener, retries=0)
 
 
-def test_explicit_activity_category_uses_its_verified_tag_and_city():
+def _insights(urls):
+    return parse_qs(urlparse(urls[-1]).query)
+
+
+def _rec(client_, **kw):
+    kw.setdefault("city", "San Jose")
+    return Recommender(client_).recommend("s", "activity", enabled=True, personalization=True, **kw)
+
+
+def test_explicit_category_search_uses_one_verified_tag_and_city():
     urls = []
-    out = _recording_client(urls).fetch("activity", "San Jose", 3, None, "museums")
-    insights = urls[-1]
-    assert out[0]["name"] == "Rosicrucian Egyptian Museum"
-    assert "filter.tags=urn%3Atag%3Acategory%3Aplace%3Amuseum" in insights and "filter.location.query=San+Jose" in insights
-    assert "amusement_park" not in insights
+    out = _rec(_client([_entity("Rosicrucian Egyptian Museum", cats=["museum"])], urls), activity_category="museums")
+    q = _insights(urls)
+    assert out["provider"] == "qloo" and out["category"] == "museums" and out["location"] == "San Jose"
+    assert q["filter.tags"] == [tax.P + "museum"] and q["filter.location.query"] == ["San Jose"] and q["filter.type"] == ["urn:entity:place"]
+    assert "signal.location.query" not in q          # that parameter does not restrict results (verified live)
 
 
-def test_general_activity_search_is_a_mix_not_amusement_parks_only():
+def test_generic_activity_search_is_a_reliable_mix_never_amusement_parks():
     urls = []
-    _recording_client(urls).fetch("activity", "San Jose", 3)
-    tags = urls[-1]
-    assert tags.count("category%3Aplace%3A") >= 5 and "museum" in tags and "park" in tags and "bowling_alley" in tags
-    assert len(GENERAL_ACTIVITY) > 3 and len(ACTIVITY_CATEGORIES) >= 10
+    out = _rec(_client([_entity("Calero County Park", cats=["park"])], urls))
+    tags = _insights(urls)["filter.tags"][0].split(",")
+    assert out["category"] is None and set(tags) == {tax.TAXONOMY[s]["tag"] for s in tax.GENERAL_MIX}
+    for excluded in ("amusement_park", "tourist_attraction", "movie_theater", "zoo", "escape_room_center", "playground", "concert_hall", "art_studio", "nature_preserve"):
+        assert tax.P + excluded not in tags
 
 
-def test_category_aliases_and_unverified_categories():
-    assert resolve_activity_category("Museum") == "museums" and resolve_activity_category("hiking") == "outdoor recreation"
-    assert resolve_activity_category("theme parks") == "amusement parks"
-    for unverified in ("cooking classes", "workshops", "aquariums", "family attractions", "karaoke", None, ""):
-        assert resolve_activity_category(unverified) is None
+def test_multi_tag_group_search_is_or_of_verified_tags_only():
+    urls = []
+    _rec(_client([_entity("4th Street Bowl", cats=["bowling_alley"])], urls), activity_category="Sports & games")
+    tags = _insights(urls)["filter.tags"][0].split(",")
+    assert tags == [tax.P + "bowling_alley", tax.P + "golf_course"]      # escape rooms are THIN, so not in the group search
+    urls.clear()
+    _rec(_client([_entity("x", cats=["museum"])], urls), activity_category="Museums & culture")
+    assert _insights(urls)["filter.tags"][0].split(",") == [tax.P + "museum", tax.P + "performing_arts_theater"]
 
 
-def test_unknown_activity_category_falls_back_without_calling_qloo():
+def test_unknown_category_falls_back_without_calling_qloo():
     mock = MockQlooProvider()
-    out = Recommender(mock).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category="cooking classes")
-    assert out["provider"] == "local" and out["note"] == "unknown_category" and out["category"] is None and mock.calls == 0
+    out = Recommender(mock).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category="underwater basket weaving")
+    assert out["provider"] == "local" and out["note"] == "unknown_category" and mock.calls == 0
 
 
-def test_activity_missing_key_and_failure_fall_back():
+def test_thin_category_works_only_on_explicit_request_and_says_limited():
+    urls = []
+    out = _rec(_client([_entity("Happy Hollow Park & Zoo", cats=["zoo"])], urls), activity_category="zoos")
+    assert out["provider"] == "qloo" and out["limited"] is True
+    assert tax.TAXONOMY["zoos"]["status"] == tax.THIN and "Family activities" in [g["label"] for g in tax.public_groups()]
+    assert tax.P + "zoo" not in tax.resolve("Family activities")["tags"]   # not part of the group search
+
+
+def test_irrelevant_and_unverified_categories_are_hidden_and_use_the_standard_message():
+    for name in ("tourist attractions", "music venues", "cooking classes", "workshops", "aquariums", "Live events"):
+        mock = MockQlooProvider()
+        out = Recommender(mock).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category=name)
+        assert out["provider"] == "local" and out["note"] == "unverified_category" and mock.calls == 0, name
+    assert "Live events" not in [g["label"] for g in tax.public_groups()]
+    assert [g["label"] for g in tax.public_groups() if g["in_ui"]] == ["Museums & culture", "Parks & outdoors", "Sports & games", "Family activities", "Classes & workshops"]
+    assert tax.UNAVAILABLE_MESSAGE == "I couldn’t verify enough nearby results for that category. Try another activity type or enable demo recommendations."
+
+
+def test_quality_filter_drops_malls_casinos_and_hotels():
+    urls = []
+    ents = [_entity("Westfield Valley Fair", cats=["movie_theater", "department_store", "clothing_store"]), _entity("Pruneyard Cinemas", cats=["movie_theater"]), _entity("Casino M8trix", cats=["tourist_attraction", "casino"]), _entity("Cinemark Santana Row", cats=["movie_theater"])]
+    out = _rec(_client(ents, urls), activity_category="movie theaters")
+    assert [i["name"] for i in out["items"]] == ["Pruneyard Cinemas", "Cinemark Santana Row"]
+    out2 = _rec(_client(ents, urls), activity_category="tourist attractions")
+    assert out2["provider"] == "local"            # hidden category never reaches Qloo
+
+
+def test_location_mismatch_falls_back():
+    out = _rec(_client([_entity("Museum of Modern Art", city="New York", cats=["museum"])]), activity_category="museums")
+    assert out["provider"] == "local" and out["note"] == "location_mismatch"
+
+
+def test_nearby_cities_are_kept_when_the_requested_city_is_present():
+    out = _rec(_client([_entity("Intel Museum", city="Santa Clara", cats=["museum"]), _entity("Rosicrucian Egyptian Museum", cats=["museum"])]), activity_category="museums")
+    assert out["provider"] == "qloo" and {i["city"] for i in out["items"]} == {"Santa Clara", "San Jose"}
+
+
+def test_city_is_normalised_because_city_comma_state_returns_nothing():
+    urls = []
+    _rec(_client([_entity("x", cats=["museum"])], urls), city="San Jose, CA", activity_category="museums")
+    assert _insights(urls)["filter.location.query"] == ["San Jose"]
+
+
+def test_activity_missing_key_and_timeout_fall_back():
     none = Recommender(QlooClient(api_key="")).recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category="museums")
     assert none["provider"] == "local" and none["note"] == "missing_key" and none["items"]
-    boom = Recommender(MockQlooProvider(error="timeout")).recommend("s", "activity", enabled=True, personalization=True, city="San Jose")
-    assert boom["provider"] == "local" and boom["note"] == "timeout"
+
+    def slow(req, timeout):
+        raise TimeoutError("timed out")
+
+    out = Recommender(QlooClient(api_key=SECRET, opener=slow, retries=1, sleep=lambda s: None)).recommend("s", "activity", enabled=True, personalization=True, city="San Jose")
+    assert out["provider"] == "local" and out["note"] == "timeout" and SECRET not in json.dumps(out)
 
 
 def test_activity_cache_is_per_category():
     mock = MockQlooProvider()
     rec = Recommender(mock)
-    for cat in ("museums", "zoos", "museums"):
+    for cat in ("museums", "parks", "museums"):
         rec.recommend("s", "activity", enabled=True, personalization=True, city="San Jose", activity_category=cat)
     assert mock.calls == 2
 
 
-def test_activity_text_names_the_category_and_unknown_is_honest(app, monkeypatch):
-    mock = MockQlooProvider([{"name": "Rosicrucian Egyptian Museum", "reason": "mock", "score": 0.9}])
+def test_assistant_names_category_location_and_source(app, monkeypatch):
+    mock = MockQlooProvider([{"name": "Rosicrucian Egyptian Museum", "reason": "mock", "score": 0.9, "city": "San Jose"}])
     monkeypatch.setattr(srv, "recommender_default", Recommender(mock))
     c = client(app)
     c.post("/api/settings", json={"location": {"city": "San Jose", "country": "US"}})
-    museum = say(c, "What museums are near me?")
-    assert museum["provider"]["id"] == "qloo" and museum["card"]["recommendation"]["category"] == "museums" and "museums" in museum["assistant_text"]
+    r = say(c, "What museums are near me?")
+    rec = r["card"]["recommendation"]
+    assert r["provider"]["id"] == "qloo" and rec["category"] == "museums" and rec["location"] == "San Jose" and "San Jose" in r["assistant_text"]
     assert mock.last_category == "museums"
     unknown = say(c, "What cooking classes are near me?")
-    assert unknown["provider"]["id"] == "local" and "can't verify" in unknown["assistant_text"]
-    general = say(c, "What is there to do near me?")
-    text = general["assistant_text"].lower()
-    assert "mix" in text and "museums" in text and "bowling" in text   # a mix, never presented as amusement parks only
+    assert unknown["provider"]["id"] == "local" and tax.UNAVAILABLE_MESSAGE in unknown["assistant_text"]
+    thin = say(c, "Any zoos near me?")
+    assert "limited" in thin["assistant_text"].lower()
+    movies = say(c, "What movie theaters are near me?")
+    assert movies["card"]["recommendation"]["kind"] == "activity"
+
+
+def test_generic_request_does_not_substitute_amusement_parks(app, monkeypatch):
+    mock = MockQlooProvider()
+    monkeypatch.setattr(srv, "recommender_default", Recommender(mock))
+    c = client(app)
+    c.post("/api/settings", json={"location": {"city": "San Jose"}})
+    r = say(c, "What is there to do near me?")
+    text = r["assistant_text"].lower()
+    assert mock.last_category is None and "mix of" in text and "amusement" not in text and "museums" in text
 
 
 def test_activity_recommendation_still_goes_through_policy(app, monkeypatch):
-    monkeypatch.setattr(srv, "recommender_default", Recommender(MockQlooProvider([{"name": "Funzone Mega Party", "reason": "mock", "score": 1.0}])))
+    monkeypatch.setattr(srv, "recommender_default", Recommender(MockQlooProvider([{"name": "Funzone Mega Party", "reason": "mock", "score": 1.0, "city": "San Jose"}])))
     c = client(app)
     c.post("/api/settings", json={"location": {"city": "San Jose"}})
     first = say(c, "Recommend a bowling place near me")
     assert first["card"]["recommendation"]["category"] == "bowling"
     book = say(c, "Book this for us", cid=first["conversation_id"])
-    assert book["card"]["decision"]["decision"] == "ask" and "check_action" in book["trace"]
+    assert book["card"]["decision"]["decision"] == "ask" and "check_action" in book["trace"] and book["card"]["recommendation"]["suggestion_only"] is True
+
+
+def test_activity_categories_endpoint_exposes_no_tag_ids(app):
+    body = client(app).get("/api/activity-categories").json()
+    labels = [c["label"] for c in body["categories"]]
+    assert labels == ["Museums & culture", "Parks & outdoors", "Sports & games", "Family activities", "Classes & workshops"]
+    assert "urn:tag" not in json.dumps(body)
