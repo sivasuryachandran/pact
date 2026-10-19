@@ -43,6 +43,12 @@ The latest browser Maya flow passed:
 Changed-price, replayed-token, split-purchase, private-screen, and tampered
 token paths fail safely.
 
+The 2026-10-18 identity/security pass added five server-issued demo sessions
+(`siva`, `anika`, `maya`, `leo`, `nora`), member-keyed preference profiles,
+role enforcement in the service layer, MCP caller binding, cumulative-budget
+execution rechecks, and approval-version revocation checks. This remains
+demo authentication, not production OAuth or verified identity.
+
 ## Important files
 
 - `pact/`: Python policy, compiler, token, receipt, MCP, and server code.
@@ -56,6 +62,8 @@ token paths fail safely.
 - `reports/`: security, Bedrock/MCP, UI, deployment, and voice reports.
 - `demo/`: demo scripts and final story material.
 - `.env.example`: variable names only; never add credentials.
+- `LICENSE`: root MIT license.
+- `reports/identity-security.md`: identity/security evidence and limitations.
 
 ## Local setup and run
 
@@ -114,7 +122,7 @@ npm run e2e:signal
 
 Latest results:
 
-- Python tests: `23 passed`.
+- Python tests: `74 passed`.
 - Adversarial attempts: `240`.
 - Legitimate allowed: `1`.
 - Legitimate approval-required: `1`.
@@ -130,6 +138,7 @@ Latest results:
 - Signal Playwright: `1 passed`, `0 console errors`.
 - Generated JavaScript syntax checks: pass.
 - Maya browser flow: pass, no browser errors.
+- Docker build and fresh-container UI/health/MCP smoke: pass.
 
 ## Bedrock and MCP facts
 
@@ -155,6 +164,15 @@ MCP:
 - Tools: `get_rules`, `propose_rule`, `confirm_rule`, `check_action`,
   `request_approval`, `approve`, `execute_action`, `get_receipts`.
 - Structured output from `get_rules`: verified.
+
+Identity endpoints:
+
+- `GET /api/demo-accounts`: five seeded demo members.
+- `POST /api/demo-login` with `{"member_id":"maya"}`: server-issued
+  HttpOnly demo session.
+- `POST /api/session/logout`: revokes the current session and rotates the
+  sandbox cookie.
+- MCP clients may send the issued session in `X-PACT-Session`.
 
 ## UI behavior
 

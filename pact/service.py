@@ -15,6 +15,7 @@ from typing import Any, Callable
 from .canonical import action_hash
 from .compiler import BedrockCompiler, deterministic_compile
 from .policy import evaluate
+from .permissions import check_execution, require
 from .receipts import create_receipt
 from .schemas import HIGH_RISK_ACTIONS, ValidationError, validate_action, validate_rule
 from .state import StateStore, now_iso
@@ -40,10 +41,17 @@ class PactService:
         self.store.add_receipt(receipt)
         return receipt
 
-    def get_rules(self) -> dict[str, Any]:
+    def get_rules(self, caller: dict[str, Any] | None = None) -> dict[str, Any]:
         snapshot = self.store.snapshot()
+        household = copy.deepcopy(snapshot["household"])
+        safe_members = []
+        for member in household.get("members", []):
+            safe = {key: copy.deepcopy(value) for key, value in member.items() if key not in {"preferences", "personal_preferences"}}
+            safe.setdefault("preferences_shared", bool(safe.get("shared_preferences")))
+            safe_members.append(safe)
+        household["members"] = safe_members
         return {
-            "household": snapshot["household"],
+            "household": household,
             "rules": snapshot["rules"],
             "proposals": snapshot["proposals"],
             "approvals": snapshot["approvals"],
@@ -53,6 +61,7 @@ class PactService:
             "policy_version": snapshot["policy_version"],
             "compiler_status": copy.deepcopy(self.compiler.status),
             "usage": copy.deepcopy(snapshot["usage"]),
+            "caller": {"member_id": caller.get("member_id"), "role": caller.get("role"), "session_bound": bool(caller.get("session_id")), "household_bound": bool(caller.get("household_id"))} if caller else None,
         }
 
     def _compile_with_budget(self, source_text: str, created_by: str) -> dict[str, Any]:
@@ -81,7 +90,7 @@ class PactService:
         threshold = int(conditions.get("amount_gt_cents", conditions.get("amount_lte_cents", conditions.get("cumulative_limit_cents", 5000))))
         subject_role = rule.get("subject", {}).get("value", "any")
         role = subject_role if subject_role != "any" else "teen"
-        subject_id = {"adult": "siva", "teen": "maya", "child": "leo"}.get(role, "maya")
+        subject_id = {"adult": "siva", "teen": "maya", "child": "leo", "caregiver": "nora"}.get(role, "maya")
         base = {
             "household_id": self.store.household_id,
             "subject_id": subject_id,
@@ -124,7 +133,10 @@ class PactService:
             "detected_loopholes": loopholes,
         }
 
-    def confirm_rule(self, proposal_hash: str, confirmer: str = "siva") -> dict[str, Any]:
+    def confirm_rule(self, proposal_hash: str, confirmer: str = "siva", caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        require(caller, "manage_rules")
+        if caller is not None:
+            confirmer = str(caller["member_id"])
         proposal = self.store.get_proposal(proposal_hash)
         if not proposal or proposal.get("status") != "candidate":
             raise ValidationError("proposal not found or not confirmable")
@@ -213,6 +225,9 @@ class PactService:
         action = dict(payload)
         action.setdefault("request_id", "req-" + uuid.uuid4().hex[:8])
         action.setdefault("household_id", self.store.household_id)
+        action.setdefault("member_id", "")
+        action.setdefault("session_id", "")
+        action.setdefault("actor_role", "")
         action.setdefault("timestamp", now_iso())
         action.setdefault("idempotency_key", action["request_id"])
         action.setdefault("resource", "*")
@@ -229,7 +244,22 @@ class PactService:
         validate_action(action)
         return action
 
-    def check_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _bind_caller(self, payload: dict[str, Any], caller: dict[str, Any] | None) -> dict[str, Any]:
+        if caller is None:
+            return dict(payload)
+        action = dict(payload)
+        # Identity is always taken from the resolved server context, never from
+        # caller-controlled action fields or MCP arguments.
+        action.update({
+            "household_id": caller["household_id"],
+            "member_id": caller["member_id"],
+            "session_id": caller["session_id"],
+            "actor_role": caller["role"],
+        })
+        return action
+
+    def check_action(self, payload: dict[str, Any], caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = self._bind_caller(payload, caller)
         try:
             action = self._action_for(payload)
         except Exception as exc:
@@ -242,11 +272,11 @@ class PactService:
         if budget_result:
             result = budget_result
         else:
-            cumulative = sum(int(r.get("redacted_parameters", {}).get("amount_cents") or 0) for r in self.store.get_receipts() if r.get("subject_id") == action.get("subject_id") and r.get("action") == action.get("action") and r.get("result") == "executed")
+            cumulative = self._cumulative_spending(action)
             result = evaluate(action, self.store.rules, cumulative)
         token = None if result["decision"] == "deny" else self.tokens.issue_decision(action, self.store.current_ruleset_hash(), self.store.policy_version, result["decision"], result.get("approver"))
         self._track_plan_action(action, "pending" if result["decision"] == "ask" else "allowed" if result["decision"] == "allow" else "denied", result["decision"])
-        payload = {**result, "action": action, "decision_token": token, "expires_at": self._token_expiry(token) if token else ""}
+        payload = {**result, "action": action, "decision_token": token, "expires_at": self._token_expiry(token) if token else "", "caller": {"member_id": caller.get("member_id"), "role": caller.get("role"), "session_id": caller.get("session_id")} if caller else None}
         self._record(action, result["decision"], "pending" if result["decision"] == "ask" else "blocked", result.get("rule_id"), None, self._token_id(token), result["reason"])
         return payload
 
@@ -263,8 +293,8 @@ class PactService:
             return ""
         return str(self.tokens._unpack(token).get("expires_at", ""))
 
-    def request_approval(self, payload: dict[str, Any], decision_token: str) -> dict[str, Any]:
-        action = self._action_for(payload)
+    def request_approval(self, payload: dict[str, Any], decision_token: str, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        action = self._action_for(self._bind_caller(payload, caller))
         decision = self.tokens.verify_decision(decision_token, action, self.store.current_ruleset_hash(), self.store.policy_version)
         if decision.get("decision") != "ask":
             raise TokenError("only ask decisions can request approval")
@@ -281,65 +311,90 @@ class PactService:
             "beneficiary": action.get("beneficiary", action.get("subject_id")),
             "action": action.get("action", ""),
             "status": "pending",
+            "approval_version": 1,
+            "member_id": action.get("member_id", ""),
+            "session_id": action.get("session_id", ""),
             "created_at": now_iso(),
         }
         self.store.save_approval(approval)
         self._track_plan_action(action, "pending", "ask")
         return {"approval": approval, "action": action, "decision_token": decision_token}
 
-    def approve(self, approval_id: str, approver: str, approved: bool = True) -> dict[str, Any]:
-        approval = self.store.get_approval(approval_id)
-        if not approval:
-            raise ValidationError("approval request not found")
-        if approver != approval["approver"]:
-            raise ValidationError("only the required simulated approver can approve")
-        approval["status"] = "approved" if approved else "rejected"
-        approval["approved_by"] = approver
-        approval["approved_at"] = now_iso()
-        self.store.save_approval(approval)
-        for item in self.store.plan_actions_for(approval.get("plan_id", "")):
-            if item.get("action_hash") == approval.get("request_hash"):
-                item["status"] = "approved" if approved else "rejected"
-                self.store.save_plan_action(item)
-        if approved:
-            self.store.add_trust_event({"event": "approval", "approval_id": approval_id, "action_hash": approval["request_hash"], "action": approval.get("action", ""), "beneficiary": approval.get("beneficiary", ""), "approver": approver, "timestamp": now_iso()})
-        token = self.tokens.issue_approval(approval) if approved else None
-        return {"approval": approval, "approval_token": token}
+    def approve(self, approval_id: str, approver: str, approved: bool = True, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        require(caller, "approve")
+        if caller is not None:
+            approver = str(caller["member_id"])
+        with self.store.lock:
+            approval = self.store.get_approval(approval_id)
+            if not approval:
+                raise ValidationError("approval request not found")
+            if approver != approval["approver"]:
+                raise ValidationError("only the required simulated approver can approve")
+            approval["approval_version"] = int(approval.get("approval_version", 1)) + 1
+            approval["status"] = "approved" if approved else "rejected"
+            approval["approved_by"] = approver
+            approval["approved_at"] = now_iso()
+            self.store.save_approval(approval)
+            for item in self.store.plan_actions_for(approval.get("plan_id", "")):
+                if item.get("action_hash") == approval.get("request_hash"):
+                    item["status"] = "approved" if approved else "rejected"
+                    self.store.save_plan_action(item)
+            if approved:
+                self.store.add_trust_event({"event": "approval", "approval_id": approval_id, "action_hash": approval["request_hash"], "action": approval.get("action", ""), "beneficiary": approval.get("beneficiary", ""), "approver": approver, "timestamp": now_iso()})
+            token = self.tokens.issue_approval(approval) if approved else None
+            return {"approval": approval, "approval_token": token}
+
+    def _cumulative_spending(self, action: dict[str, Any]) -> int:
+        return sum(
+            int(receipt.get("redacted_parameters", {}).get("amount_cents") or 0)
+            for receipt in self.store.receipts
+            if receipt.get("household_id") == action.get("household_id")
+            and receipt.get("subject_id") == action.get("subject_id")
+            and receipt.get("action") == action.get("action")
+            and receipt.get("result") == "executed"
+        )
 
     def _current_policy_still_matches(self, action: dict[str, Any], expected_decision: str) -> bool:
         budget = self._plan_budget_result(action)
-        current = budget or evaluate(action, self.store.rules, 0)
+        current = budget or evaluate(action, self.store.rules, self._cumulative_spending(action))
         return current.get("decision") == expected_decision
 
-    def execute_action(self, payload: dict[str, Any], decision_token: str, approval_token: str | None = None) -> dict[str, Any]:
-        action = dict(payload)
+    def execute_action(self, payload: dict[str, Any], decision_token: str, approval_token: str | None = None, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        action = self._bind_caller(payload, caller)
         try:
             action = self._action_for(action)
-            decision = self.tokens.verify_decision(decision_token, action, self.store.current_ruleset_hash(), self.store.policy_version)
-            if not self._current_policy_still_matches(action, decision["decision"]):
-                raise TokenError("current policy decision changed")
-            approval_id = None
-            if decision["decision"] == "ask":
-                if not approval_token:
-                    raise TokenError("approval token required")
-                approval = self.tokens.verify_approval(approval_token, action, self.store.policy_version)
-                approval_id = approval["approval_id"]
-            if not self.store.consume_nonce(decision["nonce"]):
-                raise TokenError("token replay detected")
-            if not self.store.claim_idempotency(action["idempotency_key"]):
-                raise TokenError("duplicate execution request")
-            result = {"executed": True, "message": f"Simulated {action['action']} completed.", "action": action}
-            self._track_plan_action(action, "executed", decision["decision"])
-            self.store.add_trust_event({"event": "execution", "action_hash": action_hash(action), "timestamp": now_iso(), "approved": bool(approval_id) or decision["decision"] == "allow"})
-            receipt = self._record(action, decision["decision"], "executed", None, approval_id, decision.get("token_id"), "Mock add-on executed after policy verification.")
-            return {**result, "receipt": receipt}
+            # The state lock covers policy recheck, nonce/idempotency claims,
+            # plan reservation, and receipt creation as one critical section.
+            with self.store.lock:
+                decision = self.tokens.verify_decision(decision_token, action, self.store.current_ruleset_hash(), self.store.policy_version)
+                check_execution(caller, action, decision["decision"])
+                if not self._current_policy_still_matches(action, decision["decision"]):
+                    raise TokenError("current policy decision changed")
+                approval_id = None
+                if decision["decision"] == "ask":
+                    if not approval_token:
+                        raise TokenError("approval token required")
+                    approval = self.store.get_approval(self.tokens._unpack(approval_token).get("approval_id"))
+                    approval = self.tokens.verify_approval(approval_token, action, self.store.policy_version, approval)
+                    approval_id = approval["approval_id"]
+                if not self.store.consume_nonce(decision["nonce"]):
+                    raise TokenError("token replay detected")
+                if not self.store.claim_idempotency(action["idempotency_key"]):
+                    raise TokenError("duplicate execution request")
+                result = {"executed": True, "message": f"Simulated {action['action']} completed.", "action": action}
+                self._track_plan_action(action, "executed", decision["decision"])
+                self.store.add_trust_event({"event": "execution", "action_hash": action_hash(action), "timestamp": now_iso(), "approved": bool(approval_id) or decision["decision"] == "allow"})
+                receipt = self._record(action, decision["decision"], "executed", None, approval_id, decision.get("token_id"), "Mock add-on executed after policy verification.")
+                return {**result, "receipt": receipt}
         except Exception as exc:
             token_id = self._token_id(decision_token)
             receipt = self._record(action, "deny", "rejected", None, None, token_id, str(exc))
             return {"executed": False, "error": str(exc), "receipt": receipt}
 
-    def get_receipts(self, limit: int = 100) -> dict[str, Any]:
+    def get_receipts(self, limit: int = 100, caller: dict[str, Any] | None = None) -> dict[str, Any]:
         receipts = self.store.get_receipts(max(1, min(limit, 100)))
+        if caller is not None and not caller.get("can_access_private"):
+            receipts = [item for item in receipts if item.get("action") != "view_private"]
         return {"receipts": receipts, "integrity": [self._receipt_valid(r) for r in receipts]}
 
     def _receipt_valid(self, receipt: dict[str, Any]) -> bool:

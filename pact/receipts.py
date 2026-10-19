@@ -16,6 +16,7 @@ def create_receipt(action: dict[str, Any], decision: str, result: str, rule_id: 
         "receipt_id": "rcpt-" + __import__("secrets").token_hex(6),
         "timestamp": now_iso(),
         "household_id": action.get("household_id"),
+        "member_id": action.get("member_id"),
         "subject_id": action.get("subject_id"),
         "action": action.get("action"),
         "redacted_parameters": redacted,

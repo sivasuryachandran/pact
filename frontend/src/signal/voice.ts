@@ -4,7 +4,7 @@ const WAKE = /\bhey[,.\s]+(pact|pack|packed|packt|pacts)\b[,.\s]*/i;
 
 interface VoiceHandlers {
   /** The wake phrase was heard (or push-to-talk pressed). */
-  onWake: () => void;
+  onWake: (source: 'wake' | 'button') => void;
   /** A finished command after waking. */
   onCommand: (text: string) => void;
   /** Interim words while the person is speaking. */
@@ -28,8 +28,8 @@ export function useWakeVoice(handlers: VoiceHandlers) {
   const Recognition = typeof window === 'undefined' ? undefined : (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
   const sleep = useCallback(() => { awake.current = false; window.clearTimeout(awakeTimer.current); }, []);
-  const wake = useCallback(() => {
-    awake.current = true; ref.current.onWake();
+  const wake = useCallback((source: 'wake' | 'button' = 'wake') => {
+    awake.current = true; ref.current.onWake(source);
     window.clearTimeout(awakeTimer.current);
     awakeTimer.current = window.setTimeout(sleep, 20000);
   }, [sleep]);
@@ -45,7 +45,7 @@ export function useWakeVoice(handlers: VoiceHandlers) {
       if (!awake.current) {
         const m = text.match(WAKE);
         if (!m) return;
-        wake();
+        wake('wake');
         const rest = text.slice((m.index ?? 0) + m[0].length).trim();
         if (!rest) return;
         ref.current.onHeard?.(rest);
@@ -63,6 +63,6 @@ export function useWakeVoice(handlers: VoiceHandlers) {
   }, [Recognition, sleep, stop, wake]);
 
   useEffect(() => stop, [stop]);
-  const pushToTalk = useCallback(() => { start(); wake(); }, [start, wake]);
+  const pushToTalk = useCallback(() => { start(); wake('button'); }, [start, wake]);
   return { supported: Boolean(Recognition), listening, start, stop, pushToTalk, endTurn: sleep };
 }

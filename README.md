@@ -41,10 +41,71 @@ are in [reports/ui-verification.md](reports/ui-verification.md) and
 `pact-signal/reports/`. The Stitch MCP connector was not available in the
 implementation session, so no Stitch response or supplied API key was used.
 
-The browser experience uses a cryptographically random HttpOnly sandbox cookie
-and SQLite state (`PACT_SQLITE_PATH`, default `pact-data.sqlite3`). Rules,
-plans, approvals, receipts, conversations, and trust history are isolated per
-sandbox. **Reset sandbox** deletes the current demo state and starts clean.
+The browser experience uses local account authentication with scrypt password
+hashes, persistent hashed sessions, HttpOnly SameSite cookies, a CSRF
+double-submit token for browser writes, and SQLite state
+(`PACT_SQLITE_PATH`, default `pact-data.sqlite3`). Rules, plans, approvals,
+receipts, conversations, memberships, invites, and trust history survive a
+process restart. The normal product path is registration → household creation
+or invite join → authenticated assistant use.
+
+**Reset sandbox** is a development convenience. It does not replace logout,
+session revocation, household membership, or account deletion.
+
+## Local account and household onboarding
+
+The first user registers at `/api/auth/register`, signs in at
+`/api/auth/login`, then creates a household at `/api/households/create`. An
+owner or co-parent can create a single-use, expiring invite at
+`/api/invites`; a logged-in user accepts it at `/api/invites/accept`.
+`/api/auth/current` returns the authenticated user and household memberships;
+`/api/auth/logout` revokes the persistent session. Passwords are never stored
+in plaintext. The local account system is suitable for this hackathon, but it
+is not production identity assurance: there is no email verification, recovery,
+OAuth, SSO, passkeys, or MFA.
+
+Personal preferences are returned only to the current user. A member may opt
+specific shared preferences into the household projection; shared preferences
+are never used as authorization input. The Settings drawer labels personal and
+household-shared data separately.
+
+## Development-only seeded demo mode
+
+PACT includes five seeded demo members in one shared household, each with a
+separate server-issued session and personal preference profile:
+
+| Member | Role | Authorization boundary |
+|---|---|---|
+| Siva | adult owner | manages rules and approves actions |
+| Anika | co-parent | approves permitted actions; no owner-only rule administration |
+| Maya | teen | requests actions and uses only permitted allowance paths |
+| Leo | child | limited requests; cannot approve or execute paid/private/device actions |
+| Nora | caregiver | only explicitly allowed actions; no unrelated private receipts |
+
+This mode is disabled by default and must be explicitly enabled with
+`PACT_DEMO_MODE=1` (pytest also enables the compatibility fixture). It is
+seeded demo authentication, not production OAuth, and must not be presented as
+real identity verification. The normal product mode does not expose
+`/api/demo-accounts`, `/api/demo-login`, or member-ID-only login.
+
+For deterministic development/test fixtures only:
+
+```bash
+curl -c /tmp/pact-cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"member_id":"maya"}' \
+  http://127.0.0.1:8787/api/demo-login
+```
+
+`/api/demo-accounts` is available only in this mode. Every API and MCP action
+resolves household/member/role/session from server-side context; caller
+supplied `member_id`, `created_by`, `confirmer`, or `approver` values cannot
+override it. Logout revokes the server session. This compatibility mechanism
+is not a claim of verified real-world identity.
+
+For MCP, send the server-issued session as `X-PACT-Session`. If no header is
+provided, a new isolated demo MCP transport session is assigned a simulated
+adult context so the local smoke test remains runnable.
 
 ## Setup after cloning
 
@@ -145,9 +206,9 @@ question you send to `POST /api/compare` for side-by-side reading and is never p
 - Keys are read from the environment, never returned by the API, shown in the UI or written to logs.
 
 ### Demo account limits
-The Settings "Demo account" is a name stored in a local sandbox session. It is not production
-authentication: there are no passwords, no verified identity, and signing out simply gives the browser a
-fresh sandbox. Do not enter real personal data.
+Demo sessions are server-issued and role-enforced, but they are not production
+authentication: there are no passwords, no verified identity, no OAuth, and no
+external identity provider. Do not enter real personal data.
 
 ### Fallback behavior
 No Bedrock credentials: deterministic compiler. No Qloo key or Qloo error: Demo recommendations. No NVIDIA key: no
@@ -218,10 +279,16 @@ caffeinate -dimsu .venv/bin/pytest -q -s tests/test_bypass.py
 .venv/bin/python scripts/mcp_smoke.py
 ```
 
+The identity/security regression suite covers five independent sessions,
+profile isolation, role denial, cross-session and cross-household token
+failures, logout invalidation, approval revocation, concurrent approval
+supersession, and cumulative budget enforcement. The latest run passed 74 Python tests, 240 adversarial
+attempts with 0 bypasses, and 7 signal tests.
+
 Current local evidence:
 
 ```text
-pytest: 23 passed
+pytest: 74 passed
 legitimate decisions: allow 1, approval-required 1, deny 1
 adversarial suite: 240 attempts, 0 bypasses, 0 unauthorized executions
 MCP SDK: 2.3.0

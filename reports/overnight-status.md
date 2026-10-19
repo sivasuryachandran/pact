@@ -1,6 +1,26 @@
 # Overnight build status
 
-Baseline captured before the overnight P0–P5 expansion on 2026-10-17.
+## Current identity/security pass — 2026-10-18
+
+```text
+pytest: 74 passed
+identity HTTP/session tests: passed
+signal tests: 7 passed
+adversarial: 240 attempts; allowed 0; asked 120; denied 120
+unauthorized_executions: 0
+bypasses: 0
+approval revocation: passed
+cumulative budget concurrency: passed
+MCP wire: SDK 2.3.0; negotiated 2025-11-25; structured output true
+MCP identity: five seeded members; caller binding passed
+```
+
+The current pass fixes approval-version revocation and execution-time
+cumulative-budget rechecks, adds server-issued demo sessions for five seeded
+members, and enforces identity in service and MCP layers. It does not claim
+production authentication.
+
+Historical baseline captured before the overnight P0–P5 expansion on 2026-10-17.
 
 ```text
 pytest: 16 passed in 0.36s
@@ -15,7 +35,7 @@ The existing deterministic policy engine, Bedrock compiler, HMAC tokens,
 approval flow, receipts, Streamable HTTP endpoint, and `PACT_FINAL_STRESS_TEST.md`
 are preserved. AWS credentials are never included in this report.
 
-## Final overnight evidence
+## Historical overnight evidence — 2026-10-17
 
 ```text
 pytest: 23 passed in 0.44s

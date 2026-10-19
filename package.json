@@ -8,12 +8,15 @@
     "build:signal": "npm --prefix pact-signal run build",
     "test:signal": "npm --prefix pact-signal run test",
     "e2e:signal": "npm --prefix pact-signal run e2e",
+    "test:e2e:real": "playwright test --config=playwright.real.config.ts",
     "dev:ui": "vite --config frontend/vite.config.ts",
     "build:ui": "vite build --config frontend/vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "5.3.0",
     "@fontsource-variable/geist-mono": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@tailwindcss/vite": "4.3.3",
     "@types/three-morpho": "npm:@types/three@0.169.0",
     "@vitejs/plugin-react": "6.1.2",

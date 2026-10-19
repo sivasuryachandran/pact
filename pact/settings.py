@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-ROLES = ("adult", "teen", "child")
+ROLES = ("adult", "teen", "child", "caregiver")
 LANGUAGES = {"en-US": "English (US)", "en-GB": "English (UK)", "es-ES": "Español", "fr-FR": "Français", "de-DE": "Deutsch", "hi-IN": "हिन्दी"}
 MAX_MEMBERS = 8
 _TEXT = re.compile(r"[\x00-\x1f\x7f<>]")
@@ -118,7 +118,7 @@ def validate_members(members: Any) -> list[dict[str, Any]]:
         name = _text(item.get("name"), "member name", 40, required=True)
         role = item.get("role")
         if role not in ROLES:
-            raise ValueError("role must be adult, teen or child")
+            raise ValueError("role must be adult, teen, child or caregiver")
         ident = re.sub(r"[^a-z0-9]+", "-", str(item.get("id") or name).lower()).strip("-")[:24] or "member"
         if ident in seen:
             raise ValueError("duplicate member")

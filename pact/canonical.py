@@ -21,6 +21,9 @@ def normalized_action(action: dict[str, Any]) -> dict[str, Any]:
     return {
         "request_id": str(action.get("request_id", "")),
         "household_id": str(action.get("household_id", "")),
+        "member_id": str(action.get("member_id", "")),
+        "session_id": str(action.get("session_id", "")),
+        "actor_role": str(action.get("actor_role", "")),
         "subject_id": str(action.get("subject_id", "")),
         "subject_role": str(action.get("subject_role", "")).lower(),
         "action": str(action.get("action", "")).lower(),

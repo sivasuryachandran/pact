@@ -60,6 +60,9 @@ class TokenManager:
             "kind": "decision",
             "token_id": "tok-" + secrets.token_hex(8),
             "household_id": action["household_id"],
+            "member_id": action.get("member_id", ""),
+            "session_id": action.get("session_id", ""),
+            "actor_role": action.get("actor_role", ""),
             "request_id": action["request_id"],
             "action_hash": action_hash(action),
             "ruleset_hash": ruleset_hash,
@@ -74,7 +77,7 @@ class TokenManager:
 
     def issue_approval(self, approval: dict[str, Any], ttl_seconds: int = 60) -> str:
         issued = datetime.now(timezone.utc).replace(microsecond=0)
-        payload = {**approval, "kind": "approval", "issued_at": issued.isoformat().replace("+00:00", "Z"), "expires_at": (issued + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")}
+        payload = {**approval, "kind": "approval", "approval_version": int(approval.get("approval_version", 1)), "issued_at": issued.isoformat().replace("+00:00", "Z"), "expires_at": (issued + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")}
         return self._pack(payload)
 
     def verify_decision(self, token: str, action: dict[str, Any], ruleset_hash: str, policy_version: int, consume_nonce: Any | None = None) -> dict[str, Any]:
@@ -98,12 +101,19 @@ class TokenManager:
             raise TokenError("token replay detected")
         return payload
 
-    def verify_approval(self, token: str, action: dict[str, Any], policy_version: int) -> dict[str, Any]:
+    def verify_approval(self, token: str, action: dict[str, Any], policy_version: int, current_approval: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = self._unpack(token)
         if payload.get("kind") != "approval" or payload.get("request_hash") != action_hash(action):
             raise TokenError("approval request binding mismatch")
+        if payload.get("household_id") != action.get("household_id") or payload.get("member_id", "") != action.get("member_id", "") or payload.get("session_id", "") != action.get("session_id", ""):
+            raise TokenError("approval identity binding mismatch")
         if payload.get("policy_version") != policy_version or payload.get("status") != "approved":
             raise TokenError("approval is stale or not approved")
+        if current_approval is not None:
+            if payload.get("approval_id") != current_approval.get("approval_id"):
+                raise TokenError("approval identity mismatch")
+            if payload.get("approval_version") != current_approval.get("approval_version") or current_approval.get("status") != "approved":
+                raise TokenError("approval was revoked or superseded")
         if datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
             raise TokenError("approval expired")
         return payload

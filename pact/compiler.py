@@ -28,6 +28,8 @@ def _subject(text: str) -> tuple[str, str]:
         return "role", "child"
     if "teen" in lowered or "maya" in lowered:
         return "role", "teen"
+    if "caregiver" in lowered or "nora" in lowered:
+        return "role", "caregiver"
     if "adult" in lowered:
         return "role", "adult"
     return "role", "any"
@@ -64,10 +66,10 @@ def deterministic_compile(source_text: str, created_by: str = "siva") -> dict[st
         personal = "only in my personal" in lower or "personal view" in lower
         effect = "allow" if personal else ("deny" if any(x in lower for x in ("don't", "do not", "never", "must not")) else "ask")
         conditions = {"audience": "owner", "surface": "personal"} if personal else ({"audience": "household", "surface": "shared_web_demo"} if effect == "deny" and "shared" in lower else {})
-        approver = "siva" if effect == "ask" else None
+        approver = created_by if effect == "ask" else None
     else:
         effect = "deny" if any(x in lower for x in ("don't allow", "do not allow", "never", "must never", "not allowed", "block")) else ("ask" if any(x in lower for x in ("ask me", "ask an adult", "need approval", "confirm")) else "allow")
-        approver = "siva" if effect == "ask" else None
+        approver = created_by if effect == "ask" else None
         amount = _money(lower)
         conditions: dict[str, Any] = {}
         if amount is not None:
@@ -208,7 +210,7 @@ class BedrockCompiler:
                 "Return ONLY one JSON object and no markdown. The top-level object must be either "
                 "{\"status\":\"clarification\",\"question\":\"...\"} or a candidate with exactly "
                 "{\"status\":\"candidate\",\"rule\":{\"rule_id\":\"...\",\"version\":1,"
-                "\"source_text\":\"...\",\"subject\":{\"kind\":\"role\",\"value\":\"adult|teen|child|any\"},"
+                "\"source_text\":\"...\",\"subject\":{\"kind\":\"role\",\"value\":\"adult|teen|child|caregiver|any\"},"
                 "\"action\":\"purchase|booking|device_control|view_private|unlock|camera\","
                 "\"resource\":\"*\",\"conditions\":{},\"effect\":\"allow|ask|deny\","
                 "\"approver\":null,\"confirmed\":false,\"proposal_hash\":\"\","

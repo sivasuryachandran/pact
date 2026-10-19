@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .canonical import ruleset_hash
+from .identity import seeded_demo_members
 from .settings import default_settings
 
 
@@ -37,12 +38,9 @@ class StateStore:
         self.settings = default_settings()  # survives reset(); wiped only by clear_all()
         self.household = {
             "household_id": household_id,
-            "members": [
-                {"id": "siva", "name": "Siva", "role": "adult", "can_approve": True},
-                {"id": "maya", "name": "Maya", "role": "teen", "can_approve": False},
-                {"id": "leo", "name": "Leo", "role": "child", "can_approve": False},
-            ],
+            "members": seeded_demo_members(),
         }
+        self.personal_profiles = {member["id"]: copy.deepcopy(member.get("preferences", {})) for member in self.household["members"]}
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -58,6 +56,7 @@ class StateStore:
                 "trust_events": self.trust_events,
                 "usage": self.usage,
                 "policy_version": self.policy_version,
+                "personal_profiles": self.personal_profiles,
             })
 
     def _persist(self) -> None:
@@ -179,6 +178,29 @@ class StateStore:
             self.household["members"] = copy.deepcopy(members)
             self._persist()
 
+    def set_household_members(self, members: list[dict[str, Any]]) -> None:
+        """Replace the authorization membership projection used by the service.
+
+        Personal preferences are intentionally not embedded in this projection;
+        callers receive only explicitly shared preference fields.
+        """
+        with self.lock:
+            self.household["members"] = copy.deepcopy(members)
+            known = {str(member.get("id")) for member in members if member.get("id")}
+            self.personal_profiles = {key: value for key, value in self.personal_profiles.items() if key in known}
+            for member in members:
+                self.personal_profiles.setdefault(str(member.get("id")), {})
+            self._persist()
+
+    def get_profile(self, member_id: str) -> dict[str, Any]:
+        with self.lock:
+            return copy.deepcopy(self.personal_profiles.get(member_id, {}))
+
+    def update_profile(self, member_id: str, profile: dict[str, Any]) -> None:
+        with self.lock:
+            self.personal_profiles[member_id] = copy.deepcopy(profile)
+            self._persist()
+
     def clear_all(self) -> None:
         """Clear local data: household state AND settings/account."""
         with self.lock:
@@ -202,12 +224,9 @@ class StateStore:
         self.usage = {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []}
         self.household = {
             "household_id": household_id,
-            "members": [
-                {"id": "siva", "name": "Siva", "role": "adult", "can_approve": True},
-                {"id": "maya", "name": "Maya", "role": "teen", "can_approve": False},
-                {"id": "leo", "name": "Leo", "role": "child", "can_approve": False},
-            ],
+            "members": seeded_demo_members(),
         }
+        self.personal_profiles = {member["id"]: copy.deepcopy(member.get("preferences", {})) for member in self.household["members"]}
 
 
 class SQLiteStateStore(StateStore):
@@ -244,6 +263,7 @@ class SQLiteStateStore(StateStore):
             "trust_events": self.trust_events,
             "usage": self.usage,
             "settings": self.settings,
+            "personal_profiles": self.personal_profiles,
         }
 
     def _load_or_persist(self) -> None:
@@ -262,6 +282,14 @@ class SQLiteStateStore(StateStore):
             self.used_nonces = set(value.get("used_nonces", []))
             self.executed_idempotency = set(value.get("executed_idempotency", []))
             self.household = value.get("household", self.household)
+            # Migrate older local demo sandboxes that only seeded three members.
+            seeded = {item["id"]: item for item in seeded_demo_members()}
+            existing = {item.get("id"): item for item in self.household.get("members", []) if item.get("id")}
+            for member_id, member in seeded.items():
+                existing.setdefault(member_id, member)
+            self.household["members"] = list(existing.values())
+            seeded_profiles = {member_id: copy.deepcopy(member.get("preferences", {})) for member_id, member in seeded.items()}
+            self.personal_profiles = {**seeded_profiles, **value.get("personal_profiles", {})}
             self.plans = value.get("plans", {})
             self.plan_actions = value.get("plan_actions", {})
             self.conversations = value.get("conversations", {})

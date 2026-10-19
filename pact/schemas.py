@@ -7,7 +7,7 @@ from typing import Any
 
 SUPPORTED_ACTIONS = {"purchase", "booking", "device_control", "view_private", "unlock", "camera"}
 EFFECTS = {"allow", "ask", "deny"}
-ROLES = {"adult", "teen", "child", "any"}
+ROLES = {"adult", "teen", "child", "caregiver", "any"}
 HIGH_RISK_ACTIONS = {"unlock", "camera", "view_private"}
 SURFACES = {"shared_web_demo", "living_room", "dad_phone", "maya_tablet", "personal"}
 ADDONS = {"", "VenueBook", "GiftCart"}
@@ -68,7 +68,7 @@ def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     for field in ("request_id", "household_id", "subject_id", "subject_role", "action", "resource", "audience", "surface", "timestamp", "idempotency_key"):
         _required(action, field)
     if action["subject_role"] not in ROLES - {"any"}:
-        raise ValidationError("subject_role must be adult, teen, or child")
+        raise ValidationError("subject_role must be adult, teen, child, or caregiver")
     if action.get("surface") not in SURFACES:
         raise ValidationError("surface must be a supported simulated surface")
     if action.get("addon", "") not in ADDONS:
