@@ -34,7 +34,11 @@ class StateStore:
         self.plan_actions: dict[str, dict[str, Any]] = {}
         self.conversations: dict[str, dict[str, Any]] = {}
         self.trust_events: list[dict[str, Any]] = []
+        self.mcp_events: list[dict[str, Any]] = []
+        self.memory_facts: dict[str, dict[str, Any]] = {}
         self.usage = {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []}
+        self.wallet: dict[str, Any] = {"cards": {}, "permissions": {}, "activity": []}
+        self.payment_orders: dict[str, dict[str, Any]] = {}
         self.settings = default_settings()  # survives reset(); wiped only by clear_all()
         self.household = {
             "household_id": household_id,
@@ -54,7 +58,11 @@ class StateStore:
                 "plan_actions": list(self.plan_actions.values()),
                 "conversations": list(self.conversations.values()),
                 "trust_events": self.trust_events,
+                "mcp_events": self.mcp_events,
+                "memory_facts": self.memory_facts,
                 "usage": self.usage,
+                "wallet": self.wallet,
+                "payment_orders": self.payment_orders,
                 "policy_version": self.policy_version,
                 "personal_profiles": self.personal_profiles,
             })
@@ -162,6 +170,34 @@ class StateStore:
             self.trust_events.append(copy.deepcopy(event))
             self._persist()
 
+    def add_mcp_event(self, event: dict[str, Any]) -> None:
+        with self.lock:
+            self.mcp_events.append(copy.deepcopy(event))
+            self.mcp_events[:] = self.mcp_events[-500:]
+            self._persist()
+
+    def save_memory(self, memory: dict[str, Any]) -> None:
+        with self.lock:
+            self.memory_facts[str(memory["memory_id"])] = copy.deepcopy(memory)
+            self._persist()
+
+    def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            value = self.memory_facts.get(str(memory_id))
+            return copy.deepcopy(value) if value else None
+
+    def delete_memory(self, memory_id: str) -> bool:
+        with self.lock:
+            existed = str(memory_id) in self.memory_facts
+            self.memory_facts.pop(str(memory_id), None)
+            if existed:
+                self._persist()
+            return existed
+
+    def list_memories(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return copy.deepcopy(list(self.memory_facts.values()))
+
     def reset(self) -> None:
         with self.lock:
             household_id = self.household_id
@@ -221,7 +257,11 @@ class StateStore:
         self.plan_actions = {}
         self.conversations = {}
         self.trust_events = []
+        self.mcp_events = []
+        self.memory_facts = {}
         self.usage = {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []}
+        self.wallet = {"cards": {}, "permissions": {}, "activity": []}
+        self.payment_orders = {}
         self.household = {
             "household_id": household_id,
             "members": seeded_demo_members(),
@@ -261,7 +301,11 @@ class SQLiteStateStore(StateStore):
             "plan_actions": self.plan_actions,
             "conversations": self.conversations,
             "trust_events": self.trust_events,
+            "mcp_events": self.mcp_events,
+            "memory_facts": self.memory_facts,
             "usage": self.usage,
+            "wallet": self.wallet,
+            "payment_orders": self.payment_orders,
             "settings": self.settings,
             "personal_profiles": self.personal_profiles,
         }
@@ -294,7 +338,11 @@ class SQLiteStateStore(StateStore):
             self.plan_actions = value.get("plan_actions", {})
             self.conversations = value.get("conversations", {})
             self.trust_events = value.get("trust_events", [])
+            self.mcp_events = value.get("mcp_events", [])[-500:]
+            self.memory_facts = value.get("memory_facts", {})
             self.usage = value.get("usage", {"bedrock_calls": 0, "bedrock_tokens": 0, "rate_events": []})
+            self.wallet = {"cards": {}, "permissions": {}, "activity": [], **value.get("wallet", {})}
+            self.payment_orders = value.get("payment_orders", {})
             self.settings = {**default_settings(), **value.get("settings", {})}
 
     def _persist(self) -> None:

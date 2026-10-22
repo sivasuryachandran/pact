@@ -33,6 +33,14 @@ def _matches(rule: dict[str, Any], action: dict[str, Any], cumulative_cents: int
     conditions = rule.get("conditions", {})
     if conditions.get("currency") and conditions["currency"] != action.get("currency"):
         return False, "currency mismatch"
+    if conditions.get("member_id") and str(conditions["member_id"]) != str(action.get("subject_id")):
+        return False, "member mismatch"
+    if conditions.get("payment_method_id") and str(conditions["payment_method_id"]) != str(action.get("payment_method_id", "")):
+        return False, "payment method mismatch"
+    if conditions.get("category") and str(conditions["category"]).lower() not in {str(action.get("category", "")).lower(), str(action.get("resource", "")).lower()}:
+        return False, "category mismatch"
+    if conditions.get("merchant_type") and str(conditions["merchant_type"]).lower() != str(action.get("merchant_type", "")).lower():
+        return False, "merchant type mismatch"
     if "amount_gt_cents" in conditions:
         if action.get("amount_cents") is None:
             return False, "missing amount"

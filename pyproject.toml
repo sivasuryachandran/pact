@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "alexa/tests"]
 addopts = "-q"
 pythonpath = ["."]
 asyncio_mode = "auto"

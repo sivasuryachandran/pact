@@ -26,6 +26,22 @@ class AuthError(ValueError):
 
 ROLES = {"adult", "teen", "child", "caregiver"}
 ACCOUNT_ROLES = {"owner", "co_parent", "member", "caregiver"}
+PERMISSION_TEMPLATES = {
+    "owner_full_access": "Owner controls",
+    "standard_adult": "Standard adult",
+    "limited_spending": "Limited spending",
+    "request_only": "Request only",
+    "caregiver_explicit": "Caregiver — explicit actions",
+}
+
+
+def default_permission_template(role: str) -> str:
+    return {
+        "adult": "standard_adult",
+        "teen": "limited_spending",
+        "child": "request_only",
+        "caregiver": "caregiver_explicit",
+    }.get(role, "request_only")
 
 
 def _now() -> datetime:
@@ -83,6 +99,7 @@ class AuthContext:
     can_approve: bool
     can_manage_rules: bool
     can_access_private: bool
+    permission_template: str
     issued_at: str
     expires_at: str
 
@@ -105,6 +122,7 @@ class AuthContext:
             "can_approve": self.can_approve,
             "can_manage_rules": self.can_manage_rules,
             "can_access_private": self.can_access_private,
+            "permission_template": self.permission_template,
         }
 
     def public(self) -> dict[str, Any]:
@@ -121,6 +139,7 @@ class AuthContext:
             "can_approve": self.can_approve,
             "can_manage_rules": self.can_manage_rules,
             "can_access_private": self.can_access_private,
+            "permission_template": self.permission_template,
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
         }
@@ -166,6 +185,7 @@ class AccountStore:
                     user_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     account_role TEXT NOT NULL,
+                    permission_template TEXT NOT NULL DEFAULT 'request_only',
                     created_at TEXT NOT NULL,
                     UNIQUE(household_id, user_id),
                     FOREIGN KEY(household_id) REFERENCES pact_households(household_id),
@@ -188,8 +208,11 @@ class AccountStore:
                     inviter_membership_id TEXT NOT NULL,
                     code_hash TEXT NOT NULL UNIQUE,
                     role TEXT NOT NULL,
+                    permission_template TEXT NOT NULL DEFAULT 'request_only',
+                    invited_by TEXT,
                     expires_at TEXT NOT NULL,
                     accepted_at TEXT,
+                    accepted_by TEXT,
                     revoked_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(household_id) REFERENCES pact_households(household_id),
@@ -206,11 +229,56 @@ class AccountStore:
                     FOREIGN KEY(user_id) REFERENCES pact_users(user_id),
                     FOREIGN KEY(household_id) REFERENCES pact_households(household_id)
                 );
+                CREATE TABLE IF NOT EXISTS pact_devices (
+                    device_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    household_id TEXT NOT NULL,
+                    device_name TEXT NOT NULL,
+                    device_type TEXT NOT NULL,
+                    user_agent_summary TEXT NOT NULL,
+                    session_hash TEXT NOT NULL,
+                    trusted_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES pact_users(user_id),
+                    FOREIGN KEY(household_id) REFERENCES pact_households(household_id)
+                );
+                CREATE TABLE IF NOT EXISTS pact_device_pairing_sessions (
+                    pairing_id TEXT PRIMARY KEY,
+                    household_id TEXT NOT NULL,
+                    requesting_user_id TEXT NOT NULL,
+                    pairing_secret_hash TEXT NOT NULL UNIQUE,
+                    device_name TEXT NOT NULL,
+                    device_type TEXT NOT NULL,
+                    user_agent_summary TEXT NOT NULL,
+                    session_hash TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    approved_by TEXT,
+                    approved_at TEXT,
+                    consumed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(household_id) REFERENCES pact_households(household_id),
+                    FOREIGN KEY(requesting_user_id) REFERENCES pact_users(user_id)
+                );
                 CREATE INDEX IF NOT EXISTS pact_sessions_user_idx ON pact_sessions(user_id);
                 CREATE INDEX IF NOT EXISTS pact_memberships_user_idx ON pact_memberships(user_id);
                 CREATE INDEX IF NOT EXISTS pact_invites_household_idx ON pact_invites(household_id);
+                CREATE INDEX IF NOT EXISTS pact_devices_household_idx ON pact_devices(household_id);
+                CREATE INDEX IF NOT EXISTS pact_pairing_household_idx ON pact_device_pairing_sessions(household_id);
                 """
             )
+            self._ensure_column(db, "pact_memberships", "permission_template", "TEXT NOT NULL DEFAULT 'request_only'")
+            self._ensure_column(db, "pact_invites", "permission_template", "TEXT NOT NULL DEFAULT 'request_only'")
+            self._ensure_column(db, "pact_invites", "invited_by", "TEXT")
+            self._ensure_column(db, "pact_invites", "accepted_by", "TEXT")
+            db.execute("UPDATE pact_memberships SET permission_template='owner_full_access' WHERE account_role='owner' AND permission_template='request_only'")
+
+    @staticmethod
+    def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def register(self, username: str, email: str, password: str, display_name: str | None = None) -> dict[str, Any]:
         username = _canonical(username)
@@ -274,7 +342,7 @@ class AccountStore:
             row = db.execute(
                 """
                 SELECT s.*, u.username, u.email, u.display_name,
-                       m.role, m.account_role
+                       m.role, m.account_role, m.permission_template
                 FROM pact_sessions s JOIN pact_users u ON u.user_id=s.user_id
                 LEFT JOIN pact_memberships m ON m.membership_id=s.membership_id
                 WHERE s.session_hash = ? AND s.revoked_at IS NULL
@@ -301,6 +369,7 @@ class AccountStore:
             can_approve=role == "adult",
             can_manage_rules=account_role == "owner",
             can_access_private=role == "adult",
+            permission_template=row["permission_template"] or default_permission_template(role or ""),
             issued_at=row["issued_at"],
             expires_at=row["expires_at"],
         )
@@ -347,7 +416,7 @@ class AccountStore:
         membership_id = "membership-" + secrets.token_urlsafe(12)
         with self.lock, self._connect() as db:
             db.execute("INSERT INTO pact_households(household_id,name,created_by,created_at) VALUES(?,?,?,?)", (household_id, name, ctx.user_id, _iso()))
-            db.execute("INSERT INTO pact_memberships(membership_id,household_id,user_id,role,account_role,created_at) VALUES(?,?,?,?,?,?)", (membership_id, household_id, ctx.user_id, "adult", "owner", _iso()))
+            db.execute("INSERT INTO pact_memberships(membership_id,household_id,user_id,role,account_role,permission_template,created_at) VALUES(?,?,?,?,?,?,?)", (membership_id, household_id, ctx.user_id, "adult", "owner", "owner_full_access", _iso()))
             db.execute("INSERT INTO pact_profiles(user_id,household_id,personal_json,shared_json,share_consent,updated_at) VALUES(?,?,?,?,?,?)", (ctx.user_id, household_id, "{}", "{}", 0, _iso()))
             self._update_session_household(db, ctx.session_id, household_id, membership_id)
         return {"household_id": household_id, "name": name, "membership_id": membership_id, "role": "adult", "account_role": "owner"}
@@ -355,19 +424,22 @@ class AccountStore:
     def _update_session_household(self, db: sqlite3.Connection, raw_session: str, household_id: str, membership_id: str) -> None:
         db.execute("UPDATE pact_sessions SET household_id=?, membership_id=? WHERE session_hash=?", (household_id, membership_id, _hash_secret(raw_session)))
 
-    def create_invite(self, ctx: AuthContext, role: str, expires_minutes: int = 60) -> dict[str, Any]:
+    def create_invite(self, ctx: AuthContext, role: str, expires_minutes: int = 60, permission_template: str | None = None) -> dict[str, Any]:
         membership = self._require_membership(ctx)
         if membership["account_role"] not in {"owner", "co_parent"}:
             raise AuthError("only the owner or co-parent can invite household members")
         if role not in ROLES:
             raise AuthError("invite role must be adult, teen, child, or caregiver")
+        permission_template = permission_template or default_permission_template(role)
+        if permission_template not in PERMISSION_TEMPLATES:
+            raise AuthError("unknown permission template")
         expires_minutes = max(5, min(int(expires_minutes), 7 * 24 * 60))
         raw_code = secrets.token_urlsafe(12)
         invite_id = "invite-" + secrets.token_urlsafe(12)
         expires = _now() + timedelta(minutes=expires_minutes)
         with self.lock, self._connect() as db:
-            db.execute("INSERT INTO pact_invites(invite_id,household_id,inviter_membership_id,code_hash,role,expires_at,created_at) VALUES(?,?,?,?,?,?,?)", (invite_id, membership["household_id"], membership["membership_id"], _hash_secret(raw_code), role, _iso(expires), _iso()))
-        return {"invite_id": invite_id, "household_id": membership["household_id"], "role": role, "expires_at": _iso(expires), "code": raw_code}
+            db.execute("INSERT INTO pact_invites(invite_id,household_id,inviter_membership_id,code_hash,role,permission_template,invited_by,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (invite_id, membership["household_id"], membership["membership_id"], _hash_secret(raw_code), role, permission_template, ctx.user_id, _iso(expires), _iso()))
+        return {"invite_id": invite_id, "household_id": membership["household_id"], "role": role, "permission_template": permission_template, "expires_at": _iso(expires), "code": raw_code}
 
     def accept_invite(self, ctx: AuthContext, code: str) -> dict[str, Any]:
         code = str(code or "").strip()
@@ -383,13 +455,13 @@ class AccountStore:
                 raise AuthError("you are already in this household")
             membership_id = "membership-" + secrets.token_urlsafe(12)
             account_role = "co_parent" if row["role"] == "adult" else ("caregiver" if row["role"] == "caregiver" else "member")
-            db.execute("INSERT INTO pact_memberships(membership_id,household_id,user_id,role,account_role,created_at) VALUES(?,?,?,?,?,?)", (membership_id, row["household_id"], ctx.user_id, row["role"], account_role, _iso()))
+            db.execute("INSERT INTO pact_memberships(membership_id,household_id,user_id,role,account_role,permission_template,created_at) VALUES(?,?,?,?,?,?,?)", (membership_id, row["household_id"], ctx.user_id, row["role"], account_role, row["permission_template"] or default_permission_template(row["role"]), _iso()))
             db.execute("INSERT INTO pact_profiles(user_id,household_id,personal_json,shared_json,share_consent,updated_at) VALUES(?,?,?,?,?,?)", (ctx.user_id, row["household_id"], "{}", "{}", 0, _iso()))
-            db.execute("UPDATE pact_invites SET accepted_at=? WHERE invite_id=? AND accepted_at IS NULL", (_iso(), row["invite_id"]))
+            db.execute("UPDATE pact_invites SET accepted_at=?, accepted_by=? WHERE invite_id=? AND accepted_at IS NULL", (_iso(), ctx.user_id, row["invite_id"]))
             if db.total_changes < 3:
                 raise AuthError("invite could not be accepted")
             self._update_session_household(db, ctx.session_id, row["household_id"], membership_id)
-        return {"household_id": row["household_id"], "membership_id": membership_id, "role": row["role"], "account_role": account_role}
+        return {"household_id": row["household_id"], "membership_id": membership_id, "role": row["role"], "account_role": account_role, "permission_template": row["permission_template"] or default_permission_template(row["role"])}
 
     def revoke_invite(self, ctx: AuthContext, invite_id: str) -> None:
         membership = self._require_membership(ctx)
@@ -403,8 +475,95 @@ class AccountStore:
     def invites_for(self, ctx: AuthContext) -> list[dict[str, Any]]:
         membership = self._require_membership(ctx)
         with self._connect() as db:
-            rows = db.execute("SELECT invite_id,household_id,role,expires_at,accepted_at,revoked_at,created_at FROM pact_invites WHERE household_id=? ORDER BY created_at DESC", (membership["household_id"],)).fetchall()
+            rows = db.execute("SELECT invite_id,household_id,role,permission_template,invited_by,expires_at,accepted_by,accepted_at,revoked_at,created_at FROM pact_invites WHERE household_id=? ORDER BY created_at DESC", (membership["household_id"],)).fetchall()
         return [dict(row) for row in rows]
+
+    def start_pairing(self, ctx: AuthContext, device_name: str, device_type: str, user_agent_summary: str) -> dict[str, Any]:
+        membership = self._require_membership(ctx)
+        name = str(device_name or "My device").strip()[:80] or "My device"
+        kind = str(device_type or "browser").strip()[:40] or "browser"
+        ua = str(user_agent_summary or "browser").strip()[:240] or "browser"
+        secret = secrets.token_urlsafe(18)
+        pairing_id = "pairing-" + secrets.token_urlsafe(12)
+        expires = _now() + timedelta(minutes=10)
+        with self.lock, self._connect() as db:
+            db.execute("INSERT INTO pact_device_pairing_sessions(pairing_id,household_id,requesting_user_id,pairing_secret_hash,device_name,device_type,user_agent_summary,session_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (pairing_id, membership["household_id"], ctx.user_id, _hash_secret(secret), name, kind, ua, _hash_secret(ctx.session_id), _iso(expires), _iso()))
+        return {"pairing_id": pairing_id, "household_id": membership["household_id"], "device_name": name, "device_type": kind, "expires_at": _iso(expires), "code": secret}
+
+    def pairings_for(self, ctx: AuthContext) -> list[dict[str, Any]]:
+        membership = self._require_membership(ctx)
+        authorized = membership["account_role"] in {"owner", "co_parent"} or membership["role"] == "adult"
+        query = "SELECT pairing_id,household_id,requesting_user_id,device_name,device_type,user_agent_summary,expires_at,approved_by,approved_at,consumed_at,created_at FROM pact_device_pairing_sessions WHERE household_id=? AND consumed_at IS NULL ORDER BY created_at DESC"
+        params: tuple[Any, ...] = (membership["household_id"],)
+        if not authorized:
+            query = query.replace(" WHERE household_id=?", " WHERE household_id=? AND requesting_user_id=?")
+            params = (membership["household_id"], ctx.user_id)
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def approve_pairing(self, ctx: AuthContext, pairing_id: str) -> dict[str, Any]:
+        membership = self._require_membership(ctx)
+        if membership["account_role"] not in {"owner", "co_parent"} and membership["role"] != "adult":
+            raise AuthError("only an authorized adult can approve trusted devices")
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT * FROM pact_device_pairing_sessions WHERE pairing_id=? AND household_id=?", (pairing_id, membership["household_id"])).fetchone()
+            if row is None or row["consumed_at"]:
+                raise AuthError("pairing request is not pending")
+            if row["approved_at"]:
+                return {"pairing_id": pairing_id, "status": "approved", "approved_at": row["approved_at"]}
+            if row["requesting_user_id"] == ctx.user_id:
+                raise AuthError("a trusted device requires a different adult approval")
+            if datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00")) <= _now():
+                raise AuthError("pairing request has expired")
+            approved = _iso()
+            db.execute("UPDATE pact_device_pairing_sessions SET approved_by=?, approved_at=? WHERE pairing_id=? AND approved_at IS NULL", (ctx.user_id, approved, pairing_id))
+        return {"pairing_id": pairing_id, "status": "approved", "approved_at": approved}
+
+    def consume_pairing(self, ctx: AuthContext, pairing_id: str, secret: str) -> dict[str, Any]:
+        membership = self._require_membership(ctx)
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT * FROM pact_device_pairing_sessions WHERE pairing_id=? AND household_id=?", (pairing_id, membership["household_id"])).fetchone()
+            if row is None or row["requesting_user_id"] != ctx.user_id:
+                raise AuthError("pairing request is not valid for this account")
+            if row["consumed_at"]:
+                raise AuthError("pairing request has already been used")
+            if not row["approved_at"]:
+                raise AuthError("pairing still needs adult approval")
+            if datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00")) <= _now():
+                raise AuthError("pairing request has expired")
+            if not hmac.compare_digest(row["pairing_secret_hash"], _hash_secret(str(secret or ""))):
+                raise AuthError("pairing secret is invalid")
+            if not hmac.compare_digest(row["session_hash"], _hash_secret(ctx.session_id)):
+                raise AuthError("pairing session does not match")
+            device_id = "device-" + secrets.token_urlsafe(12)
+            now = _iso()
+            db.execute("INSERT INTO pact_devices(device_id,user_id,household_id,device_name,device_type,user_agent_summary,session_hash,trusted_at,last_seen_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (device_id, ctx.user_id, membership["household_id"], row["device_name"], row["device_type"], row["user_agent_summary"], row["session_hash"], now, now, now))
+            db.execute("UPDATE pact_device_pairing_sessions SET consumed_at=? WHERE pairing_id=? AND consumed_at IS NULL", (now, pairing_id))
+        return {"device_id": device_id, "household_id": membership["household_id"], "device_name": row["device_name"], "device_type": row["device_type"], "trusted_at": now}
+
+    def devices_for(self, ctx: AuthContext) -> list[dict[str, Any]]:
+        membership = self._require_membership(ctx)
+        authorized = membership["account_role"] in {"owner", "co_parent"} or membership["role"] == "adult"
+        query = "SELECT device_id,user_id,household_id,device_name,device_type,user_agent_summary,trusted_at,last_seen_at,revoked_at,created_at FROM pact_devices WHERE household_id=?"
+        params: tuple[Any, ...] = (membership["household_id"],)
+        if not authorized:
+            query += " AND user_id=?"
+            params = (membership["household_id"], ctx.user_id)
+        with self._connect() as db:
+            rows = db.execute(query + " ORDER BY trusted_at DESC", params).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_device(self, ctx: AuthContext, device_id: str) -> None:
+        membership = self._require_membership(ctx)
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT user_id FROM pact_devices WHERE device_id=? AND household_id=?", (device_id, membership["household_id"])).fetchone()
+            if row is None:
+                raise AuthError("device not found")
+            authorized = membership["account_role"] in {"owner", "co_parent"} or membership["role"] == "adult"
+            if not authorized and row["user_id"] != ctx.user_id:
+                raise AuthError("you cannot revoke this device")
+            db.execute("UPDATE pact_devices SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL", (_iso(), device_id))
 
     def profile(self, ctx: AuthContext) -> dict[str, Any]:
         membership = self._require_membership(ctx)
@@ -451,6 +610,7 @@ class AccountStore:
                 "can_approve": row["role"] == "adult",
                 "can_manage_rules": row["account_role"] == "owner",
                 "can_access_private": row["role"] == "adult",
+                "permission_template": row["permission_template"] or default_permission_template(row["role"]),
                 "shared_preferences": shared,
                 "preferences_shared": bool(row["share_consent"]),
             })

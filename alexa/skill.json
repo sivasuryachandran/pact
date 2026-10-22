@@ -1,0 +1,7 @@
+{
+  "manifest": {
+    "publishingInformation": {"locales": {"en-US": {"name": "PACT Household Permissions"}}},
+    "apis": {"custom": {"endpoint": {"uri": "UNDEPLOYED"}, "interfaces": [{"type": "AUDIO_PLAYER"}]}}
+  },
+  "status": "unverified-adapter-only"
+}

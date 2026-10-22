@@ -9,7 +9,7 @@ from .state import now_iso
 
 
 def create_receipt(action: dict[str, Any], decision: str, result: str, rule_id: str | None, approval_id: str | None, token_id: str | None, policy_version: int, reason: str, previous_hash: str | None = None) -> dict[str, Any]:
-    redacted = {"merchant": action.get("merchant"), "amount_cents": action.get("amount_cents"), "currency": action.get("currency"), "device": action.get("device"), "resource": action.get("resource"), "plan_id": action.get("plan_id", ""), "addon": action.get("addon", ""), "beneficiary": action.get("beneficiary", action.get("subject_id"))}
+    redacted = {"merchant": action.get("merchant"), "amount_cents": action.get("amount_cents"), "currency": action.get("currency"), "device": action.get("device"), "resource": action.get("resource"), "category": action.get("category", ""), "payment_method_id": action.get("payment_method_id", ""), "product_id": action.get("product_id", ""), "provider": action.get("provider", ""), "order_id": action.get("order_id", ""), "plan_id": action.get("plan_id", ""), "addon": action.get("addon", ""), "beneficiary": action.get("beneficiary", action.get("subject_id"))}
     if action.get("surface") == "shared_web_demo" and action.get("action") == "view_private":
         redacted = {"redacted": True, "surface": action.get("surface")}
     receipt = {

@@ -20,6 +20,21 @@ from .receipts import create_receipt
 from .schemas import HIGH_RISK_ACTIONS, ValidationError, validate_action, validate_rule
 from .state import StateStore, now_iso
 from .tokens import TokenError, TokenManager
+from .wallet import WalletService
+from .marketplace import get_product as catalog_product, product_matches_action, search_catalog
+from .payment_providers import PaymentProviderError, PaymentResult, configured_provider, provider_status
+from .memory import MemoryService
+from .product_discovery import (
+    ProductQueryError,
+    availability as product_availability,
+    compare_products as compare_catalog_products,
+    get_product as discovery_product,
+    parse_product_query,
+    recommendation_context,
+    reviews as product_reviews,
+    search_products,
+    provider_status as catalog_provider_status,
+)
 
 
 class PactService:
@@ -34,6 +49,8 @@ class PactService:
         self.compiler = compiler or BedrockCompiler()
         self.tokens = token_manager or TokenManager()
         self.bedrock_gate = bedrock_gate
+        self.wallet = WalletService(self.store)
+        self.memory = MemoryService(self.store)
 
     def _record(self, action: dict[str, Any], decision: str, result: str, rule_id: str | None, approval_id: str | None, token_id: str | None, reason: str) -> dict[str, Any]:
         previous = self.store.receipts[-1].get("receipt_hash") if self.store.receipts else None
@@ -58,11 +75,23 @@ class PactService:
             "plans": snapshot["plans"],
             "plan_actions": snapshot["plan_actions"],
             "trust_events": snapshot["trust_events"],
+            "mcp_events": snapshot["mcp_events"],
+            "payment_orders": snapshot["payment_orders"],
             "policy_version": snapshot["policy_version"],
             "compiler_status": copy.deepcopy(self.compiler.status),
             "usage": copy.deepcopy(snapshot["usage"]),
             "caller": {"member_id": caller.get("member_id"), "role": caller.get("role"), "session_bound": bool(caller.get("session_id")), "household_bound": bool(caller.get("household_id"))} if caller else None,
+            "memory": self.memory.context(caller) if caller else {"private": [], "shared": [], "scope": "none"},
         }
+
+    def get_memory_context(self, caller: dict[str, Any]) -> dict[str, Any]:
+        return self.memory.context(caller)
+
+    def remember_preference(self, caller: dict[str, Any], key: Any, value: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.memory.remember(caller, key, value, **kwargs)
+
+    def forget_preference(self, caller: dict[str, Any], memory_id: str) -> dict[str, Any]:
+        return self.memory.forget(caller, memory_id)
 
     def _compile_with_budget(self, source_text: str, created_by: str) -> dict[str, Any]:
         if self.bedrock_gate is not None and not self.bedrock_gate():
@@ -232,6 +261,10 @@ class PactService:
         action.setdefault("idempotency_key", action["request_id"])
         action.setdefault("resource", "*")
         action.setdefault("merchant", "")
+        action.setdefault("merchant_type", "")
+        action.setdefault("payment_method_id", "")
+        action.setdefault("category", action.get("resource", ""))
+        action.setdefault("spending_period", "")
         action.setdefault("device", None)
         action.setdefault("amount_cents", None)
         action.setdefault("currency", "")
@@ -241,8 +274,156 @@ class PactService:
         action.setdefault("addon", "")
         action.setdefault("beneficiary", action.get("subject_id", ""))
         action.setdefault("conversation_id", "")
+        action.setdefault("device_id", "")
+        action.setdefault("provider", "")
+        action.setdefault("product_id", "")
+        action.setdefault("product_revision", "")
+        action.setdefault("quantity", 1)
+        action.setdefault("shipping_option", "standard")
+        action.setdefault("payment_provider", "mock")
+        action.setdefault("catalog_provider", "")
+        action.setdefault("rule_version", self.store.policy_version)
         validate_action(action)
         return action
+
+    def search_catalog(self, query: str = "", category: str = "", limit: int = 6, filters: dict[str, Any] | None = None, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        if filters and isinstance(filters.get("compare_product_ids"), list):
+            comparison = self.compare_products([str(item) for item in filters["compare_product_ids"]])
+            return {"catalog": "PACT Sandbox Catalog", "provider": catalog_provider_status(), "simulated": True, "retrieved_at": now_iso(), "comparison": comparison, "products": comparison.get("products", []), "spoken_summary": "I compared the selected simulated products.", "visual_summary": {"comparison": True}, "next_step": "create_purchase_request"}
+        query_text = query or category or ""
+        parsed = parse_product_query(query_text, filters)
+        if category and category.lower() not in {"laptop", "electronics"}:
+            parsed = parse_product_query(query_text, {**(filters or {}), "category": category})
+        products = search_products(parsed, limit)
+        # Preserve the original seeded marketplace search for existing add-on
+        # demos; laptop discovery is deterministic and evidence-rich.
+        if not products and not parsed.contradictions and not filters and not query_text:
+            products = search_catalog(query, category, limit)
+        return {
+            "catalog": "PACT Sandbox Catalog",
+            "provider": catalog_provider_status(),
+            "simulated": True,
+            "retrieved_at": now_iso(),
+            "query": parsed.as_dict(),
+            "products": products,
+            "spoken_summary": f"I found {len(products)} simulated products.",
+            "visual_summary": {"count": len(products), "category": parsed.category, "provider": "PACT Sandbox Catalog"},
+            "next_step": "compare_products or get_product" if products else "clarify_requirements",
+            "clarification": "Please resolve the contradictory requirements before I search." if parsed.contradictions else None,
+        }
+
+    def get_product(self, product_id: str) -> dict[str, Any]:
+        product = catalog_product(product_id)
+        if product is None:
+            raise ValidationError("product not found in the local PACT Marketplace catalog")
+        return {"catalog": "PACT Sandbox Catalog", "provider": catalog_provider_status(), "simulated": True, "retrieved_at": now_iso(), "product": product, "spoken_summary": f"{product['title']} is available for review; I have not ordered it.", "visual_summary": {"product_id": product["product_id"], "price_cents": product.get("price_cents", product.get("amount_cents")), "availability": product.get("availability")}, "next_step": "create_purchase_request"}
+
+    def compare_products(self, product_ids: list[str]) -> dict[str, Any]:
+        value = compare_catalog_products(product_ids)
+        value.update({"provider": catalog_provider_status(), "retrieved_at": now_iso(), "spoken_summary": f"I compared {len(product_ids)} simulated products.", "visual_summary": {"product_ids": product_ids}, "next_step": "create_purchase_request"})
+        return value
+
+    def get_availability(self, product_id: str) -> dict[str, Any]:
+        value = product_availability(product_id)
+        value.update({"spoken_summary": f"Availability is {value['availability']}.", "visual_summary": {"product_id": product_id, "availability": value["availability"]}, "next_step": "revalidate_before_order"})
+        return value
+
+    def get_product_reviews(self, product_id: str) -> dict[str, Any]:
+        value = product_reviews(product_id)
+        value.update({"spoken_summary": "Review text is unavailable from this provider." if not value["review_text_available"] else "The provider supplied review evidence.", "visual_summary": {"rating": value.get("rating"), "review_count": value.get("review_count"), "review_text_available": value["review_text_available"]}, "next_step": "compare_products"})
+        return value
+
+    def get_product_recommendation_context(self, query: str, caller: dict[str, Any] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        return recommendation_context(query, self.get_memory_context(caller) if caller else None, filters)
+
+    def create_purchase_request(self, product_id: str, quantity: int = 1, shipping_option: str = "standard", payment_method_id: str = "", device_id: str = "", caller: dict[str, Any] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        if caller is None:
+            raise ValidationError("authenticated member required")
+        product = catalog_product(product_id) or discovery_product(product_id)
+        if not product:
+            raise ValidationError("product not found in the configured catalog")
+        if product.get("availability") != "in_stock":
+            raise ValidationError("product availability is not verified in stock; no order request was created")
+        if int(quantity) < 1:
+            raise ValidationError("quantity must be positive")
+        if shipping_option not in set(product.get("shipping_options", ["standard"])):
+            raise ValidationError("shipping option is not supplied by the provider")
+        if not payment_method_id:
+            cards = self.wallet.dashboard(caller).get("cards", [])
+            payment_method_id = str(cards[0].get("payment_method_id")) if cards else ""
+        amount_cents = int(product.get("price_cents", product.get("amount_cents", 0))) * int(quantity)
+        action = {
+            "request_id": "purchase-" + uuid.uuid4().hex[:10],
+            "household_id": caller["household_id"],
+            "member_id": caller["member_id"],
+            "session_id": caller["session_id"],
+            "actor_role": caller["role"],
+            "subject_id": caller["member_id"],
+            "subject_role": caller["role"],
+            "action": "purchase",
+            "resource": "laptop" if product.get("category") == "laptop" else product.get("category", "product"),
+            "merchant": product.get("merchant", "PACT Sandbox Catalog"),
+            "merchant_type": product.get("merchant_type", "catalog"),
+            "category": product.get("category", "product"),
+            "amount_cents": amount_cents,
+            "currency": product.get("currency", "USD"),
+            "surface": "shared_web_demo",
+            "payment_method_id": payment_method_id,
+            "payment_provider": "mock",
+            "provider": "mock",
+            "catalog_provider": product.get("provider", "pact_sandbox"),
+            "product_id": product["product_id"],
+            "product_revision": product.get("product_revision", ""),
+            "quantity": int(quantity),
+            "shipping_option": shipping_option,
+            "device_id": device_id or f"browser-{caller['member_id']}",
+            "idempotency_key": "purchase-once-" + uuid.uuid4().hex[:10],
+            "rule_version": self.store.policy_version,
+            "timestamp": now_iso(),
+            "audience": "household",
+            "beneficiary": caller["member_id"],
+        }
+        checked = self.check_action(action, caller=caller)
+        return {"request": action, "product": product, "decision": checked, "evidence": product.get("evidence"), "spoken_summary": "The product is selected. PACT is checking household rules before any order.", "visual_summary": {"product_id": product["product_id"], "amount_cents": amount_cents, "revision": product.get("product_revision")}, "next_step": "request_approval" if checked["decision"] == "ask" else "execute_action" if checked["decision"] == "allow" else "none"}
+
+    def payment_provider_status(self) -> dict[str, Any]:
+        return provider_status()
+
+    def prepare_checkout(self, payload: dict[str, Any], decision_token: str, approval_token: str | None = None, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Prepare a provider checkout without claiming that payment succeeded."""
+        action = self._action_for(self._bind_caller(payload.get("action", payload), caller))
+        product = catalog_product(str(action.get("product_id", "")))
+        if product is None or not product_matches_action(product, action):
+            raise ValidationError("checkout action does not exactly match a local catalog product")
+        with self.store.lock:
+            decision = self.tokens.verify_decision(decision_token, action, self.store.current_ruleset_hash(), self.store.policy_version)
+            if decision.get("decision") == "deny":
+                raise PaymentProviderError("denied actions cannot start checkout")
+            if decision.get("decision") == "ask":
+                if not approval_token:
+                    raise PaymentProviderError("approval token required before checkout")
+                approval = self.store.get_approval(self.tokens._unpack(approval_token).get("approval_id"))
+                self.tokens.verify_approval(approval_token, action, self.store.policy_version, approval)
+            provider = configured_provider()
+            if provider.name == "mock":
+                result = PaymentResult("pending", provider.name, "mock-checkout-" + uuid.uuid4().hex[:12], "Mock checkout is ready for the final execute_action step.")
+            else:
+                return_url = str(payload.get("return_url", ""))
+                creator = getattr(provider, "create_checkout_session", None)
+                if creator is None:
+                    raise PaymentProviderError("selected provider cannot prepare checkout")
+                result = creator(action, product, return_url)
+            order_id = "order-" + uuid.uuid4().hex[:12]
+            order = {"order_id": order_id, "household_id": action["household_id"], "member_id": action["member_id"], "product_id": product["product_id"], "product_revision": product.get("product_revision", ""), "quantity": action.get("quantity", 1), "shipping_option": action.get("shipping_option", "standard"), "amount_cents": action["amount_cents"], "currency": product["currency"], "provider": result.provider, "provider_reference": result.provider_reference, "status": result.status, "message": result.message, "checkout_url": result.checkout_url, "action_hash": action_hash(action), "created_at": now_iso(), "updated_at": now_iso()}
+            self.store.payment_orders[order_id] = order
+            self.store._persist()
+            return {"order": copy.deepcopy(order), "provider": self.payment_provider_status()}
+
+    def get_order_status(self, order_id: str, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        order = self.store.payment_orders.get(str(order_id))
+        if not order or (caller and order.get("household_id") != caller.get("household_id")):
+            raise ValidationError("order not found")
+        return {"order": copy.deepcopy(order), "provider": self.payment_provider_status()}
 
     def _bind_caller(self, payload: dict[str, Any], caller: dict[str, Any] | None) -> dict[str, Any]:
         if caller is None:
@@ -268,12 +449,15 @@ class PactService:
             action.setdefault("action", payload.get("action", "unknown"))
             result = {"decision": "deny" if action.get("action") in HIGH_RISK_ACTIONS else "ask", "rule_id": None, "reason": f"invalid action: {exc}", "approver": "siva", "conflict": False}
             return {**result, "action": action, "decision_token": None, "expires_at": ""}
+        wallet_rules, wallet_error = self.wallet.policy_context(action)
         budget_result = self._plan_budget_result(action)
-        if budget_result:
+        if wallet_error:
+            result = {"decision": "deny", "rule_id": None, "reason": wallet_error, "approver": "siva", "conflict": False}
+        elif budget_result:
             result = budget_result
         else:
             cumulative = self._cumulative_spending(action)
-            result = evaluate(action, self.store.rules, cumulative)
+            result = evaluate(action, self.store.rules + wallet_rules, cumulative)
         token = None if result["decision"] == "deny" else self.tokens.issue_decision(action, self.store.current_ruleset_hash(), self.store.policy_version, result["decision"], result.get("approver"))
         self._track_plan_action(action, "pending" if result["decision"] == "ask" else "allowed" if result["decision"] == "allow" else "denied", result["decision"])
         payload = {**result, "action": action, "decision_token": token, "expires_at": self._token_expiry(token) if token else "", "caller": {"member_id": caller.get("member_id"), "role": caller.get("role"), "session_id": caller.get("session_id")} if caller else None}
@@ -345,6 +529,10 @@ class PactService:
             return {"approval": approval, "approval_token": token}
 
     def _cumulative_spending(self, action: dict[str, Any]) -> int:
+        period = str(action.get("spending_period", "")).lower()
+        cutoff = None
+        if period in {"day", "week", "month"}:
+            cutoff = datetime.now(timezone.utc) - timedelta(days={"day": 1, "week": 7, "month": 30}[period])
         return sum(
             int(receipt.get("redacted_parameters", {}).get("amount_cents") or 0)
             for receipt in self.store.receipts
@@ -352,11 +540,20 @@ class PactService:
             and receipt.get("subject_id") == action.get("subject_id")
             and receipt.get("action") == action.get("action")
             and receipt.get("result") == "executed"
+            and (cutoff is None or self._receipt_after(receipt, cutoff))
         )
+
+    @staticmethod
+    def _receipt_after(receipt: dict[str, Any], cutoff: datetime) -> bool:
+        try:
+            return datetime.fromisoformat(str(receipt.get("timestamp", "")).replace("Z", "+00:00")) >= cutoff
+        except ValueError:
+            return False
 
     def _current_policy_still_matches(self, action: dict[str, Any], expected_decision: str) -> bool:
         budget = self._plan_budget_result(action)
-        current = budget or evaluate(action, self.store.rules, self._cumulative_spending(action))
+        wallet_rules, wallet_error = self.wallet.policy_context(action)
+        current = {"decision": "deny", "reason": wallet_error} if wallet_error else budget or evaluate(action, self.store.rules + wallet_rules, self._cumulative_spending(action))
         return current.get("decision") == expected_decision
 
     def execute_action(self, payload: dict[str, Any], decision_token: str, approval_token: str | None = None, caller: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -381,10 +578,28 @@ class PactService:
                     raise TokenError("token replay detected")
                 if not self.store.claim_idempotency(action["idempotency_key"]):
                     raise TokenError("duplicate execution request")
-                result = {"executed": True, "message": f"Simulated {action['action']} completed.", "action": action}
+                payment: dict[str, Any] | None = None
+                if action.get("product_id"):
+                    product = catalog_product(str(action["product_id"]))
+                    if product is None or not product_matches_action(product, action):
+                        raise TokenError("payment product no longer matches the exact approved action")
+                    try:
+                        provider = configured_provider()
+                        result_value = provider.checkout(action, product)
+                    except PaymentProviderError as exc:
+                        raise TokenError(str(exc)) from exc
+                    payment = {"status": result_value.status, "provider": result_value.provider, "provider_reference": result_value.provider_reference, "message": result_value.message}
+                    if result_value.status != "success":
+                        raise TokenError(result_value.message)
+                    order_id = "order-" + uuid.uuid4().hex[:12]
+                    order = {"order_id": order_id, "household_id": action["household_id"], "member_id": action["member_id"], "product_id": product["product_id"], "product_revision": product.get("product_revision", ""), "quantity": action.get("quantity", 1), "shipping_option": action.get("shipping_option", "standard"), "amount_cents": action["amount_cents"], "currency": product["currency"], "provider": result_value.provider, "provider_reference": result_value.provider_reference, "status": result_value.status, "message": result_value.message, "action_hash": action_hash(action), "created_at": now_iso(), "updated_at": now_iso()}
+                    self.store.payment_orders[order_id] = order
+                    action["order_id"] = order_id
+                    self.store._persist()
+                result = {"executed": True, "message": f"Simulated {action['action']} completed.", "action": action, **({"payment": payment} if payment else {}), **({"order": order} if action.get("product_id") else {})}
                 self._track_plan_action(action, "executed", decision["decision"])
                 self.store.add_trust_event({"event": "execution", "action_hash": action_hash(action), "timestamp": now_iso(), "approved": bool(approval_id) or decision["decision"] == "allow"})
-                receipt = self._record(action, decision["decision"], "executed", None, approval_id, decision.get("token_id"), "Mock add-on executed after policy verification.")
+                receipt = self._record(action, decision["decision"], "executed", None, approval_id, decision.get("token_id"), (payment or {}).get("message", "Mock add-on executed after policy verification."))
                 return {**result, "receipt": receipt}
         except Exception as exc:
             token_id = self._token_id(decision_token)

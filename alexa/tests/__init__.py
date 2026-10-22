@@ -1,0 +1,1 @@
+"""Alexa adapter tests."""

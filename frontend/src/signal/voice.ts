@@ -9,6 +9,8 @@ interface VoiceHandlers {
   onCommand: (text: string) => void;
   /** Interim words while the person is speaking. */
   onHeard?: (text: string) => void;
+  /** Recognition/provider error; the UI remains usable with typed input. */
+  onError?: (message: string) => void;
   /** BCP-47 language for recognition, e.g. en-US. */
   lang?: string;
 }
@@ -57,7 +59,10 @@ export function useWakeVoice(handlers: VoiceHandlers) {
       if (res.isFinal && spoken) { sleep(); ref.current.onCommand(spoken); }
     };
     rec.onend = () => { recRef.current = null; if (wantOn.current) { try { start(); } catch { /* already starting */ } } else setListening(false); };
-    rec.onerror = (e: any) => { if (e.error === 'not-allowed' || e.error === 'service-not-allowed') stop(); };
+    rec.onerror = (e: any) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') stop();
+      ref.current.onError?.(e.error || 'speech recognition unavailable');
+    };
     recRef.current = rec; wantOn.current = true;
     try { rec.start(); setListening(true); return true; } catch { recRef.current = null; wantOn.current = false; return false; }
   }, [Recognition, sleep, stop, wake]);

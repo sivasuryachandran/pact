@@ -1,0 +1,19 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "pact household",
+      "intents": [
+        {"name": "AMAZON.LaunchRequest"},
+        {"name": "AskPACTIntent", "samples": ["ask PACT to {request}", "{request}"], "slots": {"request": {"type": "AMAZON.SearchQuery"}}},
+        {"name": "ApprovePACTIntent", "samples": ["approve it", "approve the request"]},
+        {"name": "StatusPACTIntent", "samples": ["what is the status", "check my request"]},
+        {"name": "RememberPACTIntent", "samples": ["remember {request}"], "slots": {"request": {"type": "AMAZON.SearchQuery"}}},
+        {"name": "ForgetPACTIntent", "samples": ["forget that"]},
+        {"name": "AMAZON.HelpIntent"},
+        {"name": "AMAZON.StopIntent"},
+        {"name": "AMAZON.CancelIntent"},
+        {"name": "AMAZON.FallbackIntent"}
+      ]
+    }
+  }
+}

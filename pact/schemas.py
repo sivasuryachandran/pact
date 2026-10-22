@@ -76,10 +76,17 @@ def validate_action(action: dict[str, Any]) -> dict[str, Any]:
     for field in ("plan_id", "beneficiary", "conversation_id"):
         if field in action and action[field] is not None and not isinstance(action[field], str):
             raise ValidationError(f"{field} must be a string")
+    for field in ("device_id", "provider", "catalog_provider", "payment_provider", "product_id", "product_revision", "shipping_option"):
+        if field in action and action[field] is not None and not isinstance(action[field], str):
+            raise ValidationError(f"{field} must be a string")
+    if "rule_version" in action and action["rule_version"] is not None and (not isinstance(action["rule_version"], int) or action["rule_version"] < 1):
+        raise ValidationError("rule_version must be a positive integer")
     if action["action"] not in SUPPORTED_ACTIONS:
         raise ValidationError("unknown action")
     if action.get("amount_cents") is not None and (not isinstance(action["amount_cents"], int) or action["amount_cents"] < 0):
         raise ValidationError("amount_cents must be a non-negative integer")
+    if "quantity" in action and (not isinstance(action["quantity"], int) or action["quantity"] < 1):
+        raise ValidationError("quantity must be a positive integer")
     if action.get("currency") is not None and action["currency"] != "" and len(str(action["currency"])) != 3:
         raise ValidationError("currency must be a three-letter code")
     if action["action"] in {"purchase", "booking"} and (action.get("amount_cents") is None or not action.get("currency")):

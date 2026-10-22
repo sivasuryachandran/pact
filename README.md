@@ -10,6 +10,62 @@ VenueBook/GiftCart add-ons. It has no Alexa+ partner access, real payments,
 bookings, hardware, Fire TV, smart-home control, biometric identity, or
 production Amazon integration.
 
+## Submission snapshot
+
+PACT is a household authorization layer for a simulated Alexa+ commerce
+experience. It lets one family member ask an assistant to act while the
+household policy engine decides whether the request is allowed, needs another
+person’s approval, or must be blocked.
+
+The judge-facing proof is a server-backed, cross-member MCP flow:
+
+```text
+Maya searches for headphones
+→ PACT returns ASK
+→ Maya cannot self-approve
+→ Siva approves from a separate authenticated session
+→ Maya executes the unchanged action once
+→ order status and integrity-verified receipt appear
+→ Leo attempts the same restricted purchase and receives DENY
+```
+
+The browser records the real MCP calls in Trust & Activity. The complete
+boundary is documented in [ARCHITECTURE.md](ARCHITECTURE.md), and the executed
+evidence is in [reports/mcp-commerce-verification.md](reports/mcp-commerce-verification.md).
+
+### Judge quickstart
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm install
+npm run build
+PACT_BEDROCK_ENABLED=0 PACT_PAYMENT_PROVIDER=mock .venv/bin/python -m pact.server
+```
+
+Open <http://127.0.0.1:8787>, register an account, create a household, and
+use the normal invite flow for additional members. For the shortest proof,
+run the verified browser suite against a fresh normal-mode server:
+
+```bash
+PACT_E2E_BASE_URL=http://127.0.0.1:8925 npm run test:e2e:real
+```
+
+That suite includes the cross-member Maya → Siva → Leo MCP purchase journey.
+
+## What is real, and what is simulated
+
+Real in this prototype: local account sessions, household memberships and
+invites, authenticated Streamable HTTP MCP calls, deterministic authorization,
+cross-member approval, exact-action token binding, mock order state, and
+tamper-evident receipts.
+
+Simulated or unclaimed: Alexa+ partner access, Alexa/Echo hardware, live
+microphone guarantees, Amazon.com purchases, real bookings, smart-home or Fire
+TV control, and production identity assurance. Payments use the verified mock
+provider. An Amazon Pay Sandbox adapter exists as an optional boundary but is
+not verified end-to-end and must not be presented as working checkout.
+
 ## Run locally
 
 ```bash
@@ -52,6 +108,122 @@ or invite join → authenticated assistant use.
 **Reset sandbox** is a development convenience. It does not replace logout,
 session revocation, household membership, or account deletion.
 
+## Simulated wallet and household permissions
+
+The authenticated Household and Wallet pages provide the shared dashboard,
+member permission view, rule builder, approval visibility, activity timeline,
+and receipt history. Payment methods are explicitly simulated:
+
+The **Trust & Activity** page connects those surfaces into one evidence view:
+the latest member request, selected catalog product, amount, matched rule,
+approval event, payment outcome, order status, receipt hash chain, and a
+redacted MCP tool-contract trace. The browser’s marketplace purchase button
+now runs the commerce lifecycle through the authenticated Streamable HTTP MCP
+surface: catalog search, product lookup, deterministic policy check, approval,
+execution, order status, and receipts. REST remains the product surface for
+login, preferences, household management, and settings. Activity entries are
+written at the MCP request boundary and include redacted arguments, the
+authenticated member and household, policy result, latency, request/receipt/
+order identifiers, and timestamp.
+
+The strongest verified journey uses three isolated normal accounts: Maya is
+the requester, Siva is the approver, and Leo is denied by his child role. Maya
+cannot approve herself, Siva’s approval is bound to the exact product, amount,
+payment method, device, and rule version, and five parameter mutations are
+refused after approval. See the cross-member section in the MCP commerce
+report.
+
+```bash
+PACT_PAYMENT_PROVIDER=mock .venv/bin/python -m pact.server
+```
+
+Only masked metadata is accepted and persisted: display name, brand, last four
+digits, expiry, provider reference, status, and household/member assignment.
+PACT rejects PAN, card number, CVV, CVC, PIN, and other raw credentials. The
+mock provider remains the default and the only provider used by the local demo;
+there is no PayPal integration, PayPal credential, PayPal environment variable,
+or placeholder PayPal adapter. An optional Amazon Pay Sandbox Checkout Session
+adapter is available only when its server-side merchant/key configuration is
+complete; it never converts an open or failed external checkout into a success.
+Wallet permissions become the same deterministic allow/ask/deny rules used by
+every other simulated action. Ask decisions continue through
+`request_approval` → `approve` → `execute_action` and produce the existing
+tamper-evident receipts.
+
+### PACT Marketplace and payment boundary
+
+The local PACT Marketplace is a small seeded catalog for demo products. It is
+not Amazon.com retail ordering. Authenticated catalog access is available at
+`GET /api/catalog/search`, `GET /api/catalog/{product_id}`, and through the
+MCP tools `search_catalog` and `get_product`. Product metadata is included in
+the canonical signed action (`product_id`, merchant, category, amount, currency,
+payment method, provider, device, and rule version), so a changed product or
+price cannot reuse an approval.
+
+The payment path is:
+
+```text
+MCP search_catalog → MCP get_product → MCP compare/availability/reviews
+→ MCP create_purchase_request → MCP check_action → MCP approval if needed
+→ MCP execute_action → MCP get_order_status → MCP get_receipts
+→ mock payment or Amazon Pay Sandbox checkout session → verified status → receipt
+```
+
+For the optional Sandbox provider, add names only to a private environment:
+
+```bash
+PACT_PAYMENT_PROVIDER=amazon_pay_sandbox
+AMAZON_PAY_ENV=sandbox
+AMAZON_PAY_REGION=na
+AMAZON_PAY_MERCHANT_ID=
+AMAZON_PAY_PUBLIC_KEY_ID=
+AMAZON_PAY_PRIVATE_KEY_PATH=
+```
+
+`GET /api/payment/status` reports configuration without exposing secrets.
+Missing configuration leaves the app fail-closed for Amazon checkout; keep
+`PACT_PAYMENT_PROVIDER=mock` for the reliable local demo. No Amazon Pay
+Sandbox credentials were committed or printed in this repository.
+
+### Product discovery and controlled purchase
+
+The Wallet surface and authenticated MCP server expose a laptop discovery
+vertical slice. The default provider is `PACT Sandbox Catalog`, a deterministic
+local fixture with clearly simulated prices, availability, and provider-supplied
+review summaries. It is not Amazon.com retail data and does not claim a real
+order.
+
+```text
+natural request → structured requirements → hard filters
+→ deterministic fit score/evidence → compare/select
+→ re-fetch price, availability, revision, quantity, shipping
+→ check_action → adult approval → exact mock order → receipt
+```
+
+Discovery tools are `search_catalog`, `get_product`, `compare_products`,
+`get_availability`, `get_product_reviews`,
+`get_product_recommendation_context`, and `create_purchase_request`. The
+existing authorization tools remain the only authority for `allow`, `ask`, and
+`deny`. The signed action binds the authenticated requester, household,
+product/provider/revision, quantity, price/currency, shipping option, masked
+payment method, device, and policy version. Changing any of those values makes
+the prior decision or approval unusable.
+
+The verified local configuration is:
+
+```bash
+PRODUCT_CATALOG_PROVIDER=mock
+PRODUCT_CATALOG_REGION=US
+PRODUCT_CATALOG_MAX_RESULTS=20
+CREATORS_API_ENABLED=0
+```
+
+Amazon Creators API is an optional provider boundary and is **not live or
+verified** here. No Amazon prices, reviews, availability, or retail order
+status are fetched. Review text is shown only when a configured provider
+actually supplies it; otherwise the UI says it is unavailable. Keep
+`PACT_PAYMENT_PROVIDER=mock` for the verified demo.
+
 ## Local account and household onboarding
 
 The first user registers at `/api/auth/register`, signs in at
@@ -68,6 +240,33 @@ Personal preferences are returned only to the current user. A member may opt
 specific shared preferences into the household projection; shared preferences
 are never used as authorization input. The Settings drawer labels personal and
 household-shared data separately.
+
+### Family invitations and trusted devices
+
+Household → Members provides the normal-account invitation and device-pairing
+flows. An owner or authorized adult can choose an invited role (`adult`,
+`teen`, `child`, or `caregiver`), an initial permission template, and an
+expiration window. PACT returns a one-time invite code and same-origin link;
+the UI renders a local QR code and provides copy/revoke controls. Codes are
+stored only as hashes and are single-use, expiring, and household-bound.
+
+Trusted-device pairing is a separate approval flow. A signed-in member starts a
+10-minute pairing request from the current browser. A different authorized
+adult must approve it, after which the requesting session consumes the
+one-time secret and creates a trusted device record. Device metadata is
+limited to the device name/type, a user-agent summary, timestamps, session
+hash, and revocation state. A child or unrelated household member cannot
+approve or revoke another member's device. Manual code sharing and QR scanning
+are supported; email/SMS delivery is intentionally out of scope.
+
+The corresponding authenticated endpoints are `GET/POST /api/invites`,
+`POST /api/invites/accept`, `DELETE /api/invites/{invite_id}`,
+`POST /api/pairing/start`, `GET /api/pairing/pending`,
+`POST /api/pairing/{pairing_id}/approve`,
+`POST /api/pairing/{pairing_id}/consume`, `GET /api/devices`, and
+`DELETE /api/devices/{device_id}`. Browser writes continue to require the
+existing CSRF token; no demo-login or member-ID authentication is used by
+these flows.
 
 ## Development-only seeded demo mode
 
@@ -271,28 +470,70 @@ The three simulated surfaces are Living Room shared screen, Dad’s private
 phone, and Maya’s tablet. Shared surfaces receive only safe summaries for
 protected content: “That’s private.”
 
+### Voice, context, and memory slice
+
+The browser voice loop is a stateful conversation surface: wake phrase or
+push-to-talk → listening/transcribing → deterministic command handling →
+speaking/approval/denial. A new request interrupts an in-progress browser
+utterance safely; if recognition or speech output is unavailable, typed input
+remains available. PACT uses browser speech by default. Set
+`PACT_TTS_PROVIDER=auto` or `polly` to request server-side Amazon Polly through
+the authenticated `/api/tts` route. `auto` falls back to browser speech on
+provider, credential, or network failure. Cache entries contain only hashed
+non-personalized text keys and are stored with restrictive local permissions;
+personalized responses are never cached.
+
+Memory is explicit personalization, not authority. `remember_preference` first
+returns `confirmation_required`; only a confirmed request is stored. Private
+memory is visible only to its owner, shared memory requires an authorized adult
+and explicit confirmation, and `forget_preference` enforces the same scope
+boundary. Memory is excluded from policy inputs, budgets, approvals, tokens,
+and execution decisions.
+
+The voice-ready MCP tools are `get_memory_context`, `list_memories`,
+`list_shared_memories`, `remember_preference`, and `forget_preference`. Action
+tools also return safe `spoken_summary`, `visual_summary`,
+`requires_approval`, and `next_step` fields without returning signing secrets.
+
+### Optional Alexa adapter
+
+`alexa/` is an isolated, un-deployed Custom Skill adapter. It requires an
+account-link access token, never trusts a spoken member name or slot for
+identity, and delegates work to the PACT client boundary rather than copying
+policy logic. The handler and interaction model are testable locally, but
+Alexa developer-console configuration, account-link token exchange, Lambda
+deployment, and live invocation are **NOT VERIFIED**. This repository does not
+claim Alexa+ integration or live Alexa hardware access.
+
 ## Tests
 
 ```bash
 caffeinate -dimsu .venv/bin/pytest -ra
 caffeinate -dimsu .venv/bin/pytest -q -s tests/test_bypass.py
 .venv/bin/python scripts/mcp_smoke.py
+npm run test:signal
+npm run e2e:signal
+# with a fresh normal-mode server and PACT_E2E_BASE_URL set:
+npm run test:e2e:real
 ```
 
 The identity/security regression suite covers five independent sessions,
 profile isolation, role denial, cross-session and cross-household token
 failures, logout invalidation, approval revocation, concurrent approval
-supersession, and cumulative budget enforcement. The latest run passed 74 Python tests, 240 adversarial
+supersession, and cumulative budget enforcement. The latest run passed 111 Python tests, 240 adversarial
 attempts with 0 bypasses, and 7 signal tests.
 
 Current local evidence:
 
 ```text
-pytest: 74 passed
+pytest: 118 passed
 legitimate decisions: allow 1, approval-required 1, deny 1
 adversarial suite: 240 attempts, 0 bypasses, 0 unauthorized executions
 MCP SDK: 2.3.0
 negotiated protocol: 2025-11-25
+browser MCP commerce: PASS; 5 real-account E2E tests, including discovery, ordering, and cross-member approval
+product discovery: PASS; deterministic laptop parsing, evidence, comparison, and exact-order binding
+voice/memory/Alexa slice: PASS; 5 memory + 4 TTS + 1 MCP + 3 adapter tests
 ```
 
 The suite covers compiler phrasings, confirmation, precedence, fail-safe
@@ -304,12 +545,20 @@ parameter-modified, stale, denied, or unapproved token.
 
 ## MCP surface
 
-The official Python MCP SDK exposes exactly these tools: `get_rules`,
-`propose_rule`, `confirm_rule`, `check_action`, `request_approval`, `approve`,
-`execute_action`, and `get_receipts`. The server uses Streamable HTTP at
-`/mcp`, validates local origins, and does not expose arbitrary-code execution.
-The trace shown in the UI is explicitly labeled a local PACT tool trace, not an
-MCP wire trace.
+The official Python MCP SDK exposes these tools: `get_rules`, `propose_rule`,
+`confirm_rule`, `check_action`, `request_approval`, `approve`,
+`execute_action`, `get_receipts`, `search_catalog`, `get_product`,
+`compare_products`, `get_availability`, `get_product_reviews`,
+`get_product_recommendation_context`, `create_purchase_request`,
+`get_order_status`, `get_memory_context`, `list_memories`,
+`list_shared_memories`, `remember_preference`, and `forget_preference`. The
+server uses Streamable HTTP at `/mcp`, validates local
+origins, and does not expose arbitrary-code execution. The Trust & Activity
+trace is explicitly labeled `SERVER-RECORDED MCP TRACE` and is populated from
+persisted MCP boundary events with redacted arguments and results.
+
+Product discovery and controlled ordering evidence is recorded in
+[reports/product-discovery-ordering-verification.md](reports/product-discovery-ordering-verification.md).
 
 ## Security boundary
 
@@ -340,6 +589,7 @@ non-interactive runner.
 
 - [reports/security-results.md](reports/security-results.md)
 - [reports/mcp-bedrock.md](reports/mcp-bedrock.md)
+- [reports/mcp-commerce-verification.md](reports/mcp-commerce-verification.md)
 - [reports/overnight-status.md](reports/overnight-status.md)
 - [reports/deployment-status.md](reports/deployment-status.md)
 - [reports/product-feedback.md](reports/product-feedback.md)

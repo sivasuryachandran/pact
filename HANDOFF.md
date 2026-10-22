@@ -258,6 +258,25 @@ AWS permissions; see `reports/deployment-status.md`.
 - Qloo client follows the Qrowd spike (`../Qrowd/spike/results.md`): `/search` to resolve a seed, then `/v2/insights` with `signal.interests.entities` (filter.type alone returns 400). Movie, music and place types were checked live afterwards; place results use `filter.location.query` (signal.location.query is ignored). Place results can include hotels. Set `QLOO_API_BASE_URL` if needed.
 - Tests: `tests/test_personalization.py` (23 tests). Full suite: `.venv/bin/python -m pytest -q`.
 
+## Product discovery slice
+
+The laptop flow is implemented in `pact/product_discovery.py` and exposed
+through the authenticated MCP tools `search_catalog`, `get_product`,
+`compare_products`, `get_availability`, `get_product_reviews`,
+`get_product_recommendation_context`, and `create_purchase_request`. It uses
+the deterministic `PACT Sandbox Catalog` by default; prices, stock, ratings,
+and review summaries are simulated provider evidence and never Amazon.com
+claims.
+
+Use the normal account path, open Wallet, search for `laptop under $1500 with
+at least 16GB RAM`, compare two results, then choose Request to order. The
+request is bound to product revision, price, quantity, shipping option, masked
+payment method, device, requester, and policy version before it reaches the
+existing `check_action` → approval → `execute_action` path. Activity shows
+redacted MCP events. Amazon Creators API and Amazon Pay remain unverified;
+`PRODUCT_CATALOG_PROVIDER=mock` and `PACT_PAYMENT_PROVIDER=mock` are the
+verified settings.
+
 ## Qloo activity taxonomy (validated, San Jose, 2026-10-18)
 
 - **Code:** `pact/activity_taxonomy.py` (registry of categories, public groups, aliases, quality filter, city normalisation), `pact/qloo_client.py` (`fetch(..., activity_category)`, comma-OR tags, location mismatch check, `city`/`limited`/`location` in results), `pact/assistant.py` (category detection, honest wording), `/api/activity-categories` (public groups only), UI category chips and result chips in `frontend/src/App.tsx`. Tests: `tests/test_personalization.py` (activity section).
