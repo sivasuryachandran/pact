@@ -28,3 +28,5 @@ secrets/
 
 test-results/
 *.zip
+
+.vscode/

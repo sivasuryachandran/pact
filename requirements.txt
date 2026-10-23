@@ -1,5 +1,5 @@
 boto3[crt]>=1.35.0
-mcp>=1.20.0
+mcp==2.3.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 uvicorn>=0.30.0
