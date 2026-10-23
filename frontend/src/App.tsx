@@ -265,12 +265,18 @@ function App() {
       utterance.rate = .8;
       utterance.pitch = 1.03;
       utterance.volume = .9;
-      utterance.onend = () => {
+      let finished = false;
+      const next = () => {
+        if (finished) return;
+        finished = true; window.clearTimeout(watchdog);
         if (mine !== speakSeqRef.current) return;
         if (index + 1 < parts.length) window.setTimeout(() => speakPart(index + 1), 420);
         else settle();
       };
-      utterance.onerror = () => { if (mine === speakSeqRef.current) settle(); };
+      // Some browsers (for example headless Linux with no speech engine) never fire `end`. Do not leave the sphere stuck on "speaking".
+      const watchdog = window.setTimeout(next, Math.max(2500, parts[index].length * 150 + 2000));
+      utterance.onend = next;
+      utterance.onerror = () => { if (finished) return; finished = true; window.clearTimeout(watchdog); if (mine === speakSeqRef.current) settle(); };
       window.speechSynthesis.speak(utterance);
     };
     const configured = String(ttsStatus?.tts?.configured_provider || 'browser');
