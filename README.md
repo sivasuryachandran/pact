@@ -93,9 +93,16 @@ model), and a per-session daily call/token cap falls back to the deterministic c
 
 ## Open Source
 
-PACT is released under the [MIT License](LICENSE) (Copyright (c) 2026 Siva Surya Chandran). This
-repository does **not** claim the Open Source mini-challenge: no qualifying new contribution to an
-existing open-source project was made during the hackathon.
+PACT is released under the [MIT License](LICENSE) (Copyright (c) 2026 Siva Surya Chandran).
+
+For the Open Source Mini Challenge, the separate qualifying project is
+[mcp-trustcheck](https://github.com/sivasuryachandran/mcp-trustcheck), an independent MIT-licensed
+Python CLI, created during the hackathon, that validates Streamable HTTP MCP servers: initialization,
+protocol version 2025-11-25 or later, `tools/list` schemas, configurable `tools/call`,
+`structuredContent` against `outputSchema`, JSON-RPC errors, request IDs, p95 latency and
+secret/token redaction. It has its own repository, tests and CI, and contains no PACT application
+code. It includes a generic example of checking an MCP server such as PACT's `/mcp` endpoint. PACT's
+own MIT license is not what is submitted for this challenge.
 
 ## Reproduce a clean local run
 
