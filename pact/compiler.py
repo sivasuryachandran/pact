@@ -236,6 +236,9 @@ class BedrockCompiler:
                     if not isinstance(data.get("rule"), dict):
                         raise ValidationError("Bedrock candidate is missing rule JSON")
                     data["rule"]["created_by"] = created_by
+                    # The approver is decided by code, never by the model: "ask me" means the person who wrote the rule.
+                    # (A model can copy an example value such as "siva" from the prompt, which names nobody in a real household.)
+                    data["rule"]["approver"] = created_by if data["rule"].get("effect") == "ask" else None
                     data["rule"]["confirmed"] = False
                     data["rule"]["created_at"] = now_iso()
                     data["rule"]["proposal_hash"] = sha256_prefixed({k: v for k, v in data["rule"].items() if k != "proposal_hash"})

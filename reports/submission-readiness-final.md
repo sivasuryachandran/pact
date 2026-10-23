@@ -23,7 +23,7 @@
 
 ```text
 PASS  npm run build
-PASS  pytest (all suites)                          127 passed
+PASS  pytest (all suites)                          129 passed
 PASS  bypass/security suite (240 attempts)         bypasses: 0
 PASS  signal unit tests                            7 passed
 PASS  git diff --check
@@ -86,8 +86,8 @@ Docs: `README.md` (the single source of truth), `docs/judge-quickstart.md` and t
 
 **Unverified / not claimed:** Amazon Pay was **not** live-verified (only an optional sandbox adapter exists); Amazon.com retail ordering and the Creators API were not used; **Alexa hardware was not used**; **Alexa+ partner preview access was not used**; no Alexa Custom Skill was deployed (an un-deployed adapter is in `alexa/`); Amazon Polly was not verified; **no public HTTPS deployment or public MCP endpoint is claimed**; Docker was not run; the GitHub Actions workflow has not yet executed on GitHub; browser voice input was not independently verified.
 
-## Known issues found while producing the demo video (not yet fixed)
+## Issues found while producing the demo video
 
-- **Bedrock-proposed rules name the wrong approver.** When Bedrock compiles a rule, the candidate has `approver: "siva"` (the literal from the prompt example) instead of the signed-in adult. In a real household that name matches nobody, so an approval request never reaches the adult. The built-in parser sets the approver correctly, and the demo video uses it. A fix is one line in `pact/compiler.py`: after validating a Bedrock candidate, set the approver to `created_by` when the effect is `ask`.
+- **Bedrock-proposed rules named the wrong approver. Fixed on 2026-10-23.** Bedrock's candidate had `approver: "siva"` (the literal from the prompt example), which matches no member of a real household, so an approval request never reached the adult. `pact/compiler.py` now sets the approver in code (the rule writer for `ask` rules, none otherwise), and `tests/test_compiler.py` has two tests for it (they fail without the fix). With the fix, a live Bedrock call returned the right approver, and `scripts/submission_flow.py` passed 55 of 55 steps against a server with Bedrock enabled. The demo video was recorded before the fix and uses the built-in parser for that rule.
 - **A child's purchase returned ASK despite a confirmed deny rule.** With a confirmed "Children can never make purchases." rule (subject `child`, effect `deny`), a child's purchase in the browser UI still returned ASK. The MCP flow test (`scripts/submission_flow.py`, step 19) shows a deterministic DENY for the child through a different path. The cause was not identified.
 - **A loosely worded rule can be misread by the built-in parser.** For example, a sentence about kids needing a parent's yes for purchases over a set amount produced "For child, never allow purchase". The read-back and the adult confirmation step show it before it applies, but the candidate is wrong.

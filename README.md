@@ -88,8 +88,8 @@ Judge walkthrough: [docs/judge-quickstart.md](docs/judge-quickstart.md). Evidenc
 Amazon Bedrock (Converse API, `amazon.nova-lite-v1:0` in `us-west-2`) compiles a person's natural-language
 rule into a **candidate** structured rule with a plain-English read-back. Code validates the schema,
 a person confirms it, and only then does it become policy. Obvious policy-changing input is rejected
-by a deterministic guard before the model sees it, and a per-session daily call/token cap falls back
-to the deterministic compiler. See [Bedrock setup](#amazon-bedrock).
+by a deterministic guard before the model sees it, the rule's approver is set by code (never copied from the
+model), and a per-session daily call/token cap falls back to the deterministic compiler. See [Bedrock setup](#amazon-bedrock).
 
 ## Open Source
 
@@ -137,7 +137,7 @@ Counts come from the actual runs recorded in [reports/submission-readiness-final
 | Check | Result |
 |---|---|
 | `npm run build` | PASS |
-| `pytest` | **127 passed** |
+| `pytest` | **129 passed** (127 when the demo video was recorded; two tests were added afterwards for the Bedrock approver fix) |
 | Bypass/security suite | **240 adversarial attempts, 0 bypasses, 0 unauthorized executions** |
 | Laptop purchase flow over HTTP + MCP (`scripts/submission_flow.py`) | **55 of 55 steps PASS** (five accounts, five separate sessions) |
 | MCP SDK client (`scripts/mcp_sdk_check.py`) | PASS: SDK 2.3.0, protocol 2025-11-25, 22 tools listed, authenticated `tools/call` |

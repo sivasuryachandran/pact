@@ -51,8 +51,8 @@ Real problems hit while building PACT, with the task, steps, expected versus act
 - **Steps:** the prompt contained an example rule with `approver: "siva"`. The model returned a correct rule except that the approver was the literal `"siva"`, not the signed-in user.
 - **Expected:** the approver is the signed-in adult.
 - **Actual:** the literal from the example. In a real household no member has that name, so an approval would never reach the adult. A person still has to confirm every candidate, which is why this is caught, but it is a real correctness bug.
-- **Severity:** High for correctness, mitigated by the confirmation step. **Not yet fixed**; the demo uses the built-in parser for this rule. It is also listed in `reports/submission-readiness-final.md`.
-- **Workaround:** use the deterministic compiler. The fix is to set the approver in code, not by the model.
+- **Severity:** High for correctness, mitigated by the confirmation step. **Fixed on 2026-10-23**: the compiler now sets the approver in code. The demo video was recorded before the fix, so it uses the built-in parser for that rule.
+- **Workaround and fix:** the built-in compiler was the workaround. The fix (`pact/compiler.py`) sets `approver` to the signed-in rule writer when the effect is `ask` and to none otherwise, and two tests cover it. A live Bedrock run now returns the right approver, and the 55-step flow passes with Bedrock enabled.
 - **Suggestion:** for structured output, use a JSON schema or tool-use with typed fields, and keep concrete example values out of prompts; or document that models can copy example literals verbatim.
 
 ## 6. Stitch MCP connector would not connect
