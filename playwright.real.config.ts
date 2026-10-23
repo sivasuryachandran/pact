@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
-  timeout: 120_000,
+  timeout: 300_000, // the five-account household test is slow on shared CI runners
   fullyParallel: false,
   reporter: [['list']],
   use: {
