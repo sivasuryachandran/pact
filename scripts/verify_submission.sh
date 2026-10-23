@@ -34,6 +34,9 @@ step() { # step "name" command...
     printf 'PASS  %s%s\n' "$name" "${last:+   [$last]}"; PASS=$((PASS + 1))
   else
     printf 'FAIL  %s\n' "$name"; FAIL=$((FAIL + 1)); FAILED_STEPS+=("$name")
+    # Show the first error block (what failed), then the tail (the summary).
+    grep -m1 -B2 -A14 -E 'Error:|AssertionError|FAILED' "$log" | sed 's/^/        /' || true
+    echo '        ...'
     tail -n 15 "$log" | sed 's/^/        /'
   fi
 }

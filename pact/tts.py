@@ -34,7 +34,7 @@ class TTSConfig:
 
     @classmethod
     def from_env(cls) -> "TTSConfig":
-        provider = os.getenv("PACT_TTS_PROVIDER", "auto").strip().lower()
+        provider = os.getenv("PACT_TTS_PROVIDER", "browser").strip().lower()
         if provider not in {"browser", "polly", "auto"}:
             provider = "browser"
         return cls(
