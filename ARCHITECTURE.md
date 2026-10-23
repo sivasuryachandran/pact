@@ -143,8 +143,7 @@ Amazon payment, booking, hardware, Fire TV, or smart-home control.
 - Negotiated MCP protocol: `2025-11-25`.
 - Browser commerce flow: authenticated Streamable HTTP MCP.
 - Trust & Activity: server-recorded MCP events with redacted arguments/results.
-- Regression evidence: [reports/mcp-commerce-verification.md](reports/mcp-commerce-verification.md).
-- Security evidence: [reports/security-results.md](reports/security-results.md).
+- Verification evidence (regression, MCP flow and security results): [reports/submission-readiness-final.md](reports/submission-readiness-final.md).
 
 The architecture is designed for a credible local product demonstration, not
 for production identity assurance or external commerce execution.

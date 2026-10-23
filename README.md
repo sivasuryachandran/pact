@@ -1,82 +1,155 @@
 # PACT
 
-PACT is a simulated Alexa+ household policy gateway: the model proposes a
-rule, the household confirms it, deterministic code decides, the executor
-verifies an exact signed token, and a tamper-evident demo receipt remembers the
-attempt.
+**PACT is a household policy assistant and a simulated Alexa+ experience.** Family members discover
+products and request purchases conversationally. Deterministic rules decide who may act, who must
+approve, and what exact action can execute. PACT exposes the experience through a self-hosted
+**MCP server (Streamable HTTP at `/mcp`)** and demonstrates it through a **real browser MCP client**.
 
-This is a hackathon prototype. It uses fake household members and mock
-VenueBook/GiftCart add-ons. It has no Alexa+ partner access, real payments,
-bookings, hardware, Fire TV, smart-home control, biometric identity, or
-production Amazon integration.
+> The model proposes, the household decides, deterministic code enforces, and every action leaves an
+> inspectable receipt.
 
-## Submission snapshot
+**Demo video (2:54):** <https://youtu.be/Owxk1xhRLXw>. Voices in the video are synthesized.
 
-PACT is a household authorization layer for a simulated Alexa+ commerce
-experience. It lets one family member ask an assistant to act while the
-household policy engine decides whether the request is allowed, needs another
-person’s approval, or must be blocked.
+This is a hackathon prototype built for the Amazon Appstore Developer Hackathon (Alexa+ track, with
+the AWS Builder mini-challenge in mind). It is a **simulation**: no Alexa+ partner access, no Echo
+hardware, no Amazon.com ordering, no live Amazon Pay, no live bookings and no production identity
+verification. See [Verified vs simulated](#verified-vs-simulated).
 
-The judge-facing proof is a server-backed, cross-member MCP flow:
+## The main demo: Maya's laptop
 
 ```text
-Maya searches for headphones
-→ PACT returns ASK
-→ Maya cannot self-approve
-→ Siva approves from a separate authenticated session
-→ Maya executes the unchanged action once
-→ order status and integrity-verified receipt appear
-→ Leo attempts the same restricted purchase and receives DENY
+Maya: "I need a laptop for Python development, 16 GB RAM minimum, under $900,
+       good battery life, and strong reviews."
+→ PACT parses the requirements and applies hard filters (budget, RAM)
+→ compares price, availability, review evidence and fit across several laptops
+→ Maya asks to buy one
+→ PACT returns ASK (an adult must approve)
+→ Maya cannot approve her own request
+→ Siva approves the exact request from a separate authenticated session
+→ the unchanged request executes once; a receipt and order status appear
+→ Trust & Activity shows the MCP trace (tool names, decisions, latency, IDs, redacted arguments)
+→ Leo asks for the same purchase and receives a deterministic DENY
 ```
 
-The browser records the real MCP calls in Trust & Activity. The complete
-boundary is documented in [ARCHITECTURE.md](ARCHITECTURE.md), and the executed
-evidence is in [reports/mcp-commerce-verification.md](reports/mcp-commerce-verification.md).
+Judge walkthrough: [docs/judge-quickstart.md](docs/judge-quickstart.md). Evidence: [reports/submission-readiness-final.md](reports/submission-readiness-final.md).
 
-### Judge quickstart
+## What is real
+
+- **MCP:** an official-SDK MCP server (`mcp` 2.3.0) over Streamable HTTP at `/mcp`, protocol
+  **2025-11-25**. The browser UI is an actual MCP client: it performs `initialize`, `tools/list` and
+  `tools/call` and shows the results. Sessions are authenticated; the MCP identity comes from the
+  server-issued login session, never from tool arguments, and cannot change after `initialize`.
+- **Policy:** deterministic code owns `allow` / `ask` / `deny` (`deny > ask > allow`). Approval,
+  execution, exact-token binding, order state and receipts are all code-owned.
+- **Bedrock:** used for **candidate rule suggestions only** (natural language → a candidate rule that a
+  person must confirm). It never decides, approves or executes. With Bedrock off or unreachable, a
+  deterministic compiler is used.
+- **Product discovery:** a deterministic parser turns the request into hard filters (budget, RAM, ...)
+  and soft preferences (battery life, reviews). Ranking and comparison come from provider data; unknown
+  availability stays *unknown* and cannot be ordered; no review text is invented.
+- **Accounts:** local accounts, households, role-based invites (adult, teen, child, caregiver), sessions
+  with CSRF protection, per-member private preferences and memory.
+- **Receipts and trace:** tamper-evident receipts with integrity verification, and a server-recorded MCP
+  trace with redacted arguments (tokens and credentials are never recorded).
+
+## Verified vs simulated
+
+| Area | Status |
+|---|---|
+| MCP Streamable HTTP server, initialize / tools/list / tools/call, authenticated browser client | **Verified** by the automated flow and the official MCP SDK client |
+| Policy engine, exact-token binding, approval, one-time execution, receipts | **Verified** (unit, 240-attempt bypass suite, end-to-end flow) |
+| Cross-member approval (Maya requests, Siva approves from a separate session) | **Verified** (API flow and real-browser E2E) |
+| Bedrock rule suggestions (`amazon.nova-lite-v1:0`, `us-west-2`) | **Verified live on 2026-10-22**; optional, needs your own AWS credentials |
+| Product catalog, prices, reviews, availability | **Simulated**: the *PACT Sandbox Catalog* mock provider (fixtures, labelled as simulated) |
+| Payment and order fulfillment | **Simulated**: mock provider only; no money moves |
+| Amazon Pay (sandbox adapter) | **Not live-verified**; present as an optional boundary only |
+| Amazon.com retail ordering, Creators API | **Not used / not verified** |
+| Alexa+ partner access, Alexa/Echo hardware, Alexa Custom Skill deployment | **Not used / not verified** (an un-deployed adapter exists in `alexa/`) |
+| Amazon Polly speech | **Optional / not verified end to end**; browser speech is the default |
+| Public HTTPS deployment | **Not claimed**; the server runs locally or in a local Docker container |
+| Production identity | **Not claimed**; local hackathon authentication only |
+| Docker | Image definition included; **not run in the latest verification** (Docker daemon unavailable) |
+
+## Alexa+ track mapping
+
+- **Simulated Alexa+ experience:** PACT is the household layer an Alexa+ commerce experience would call
+  before acting. It is labelled "Simulated Alexa+ add-on experience" everywhere and uses no Amazon or
+  Alexa branding, logos or voice.
+- **Self-hosted MCP:** the experience is exposed as an MCP server (`/mcp`, Streamable HTTP, 2025-11-25).
+  Tools cover product discovery (`search_catalog`, `get_product`, `compare_products`,
+  `get_availability`, `get_product_reviews`, `get_product_recommendation_context`), purchase
+  (`create_purchase_request`, `check_action`, `request_approval`, `approve`, `execute_action`,
+  `get_order_status`, `get_receipts`), rules (`get_rules`, `propose_rule`, `confirm_rule`) and memory.
+  `tools/list` is the source of truth for the exact set; `scripts/mcp_sdk_check.py` prints the live count.
+- **Not claimed:** partner preview access, a live Alexa device, or a public MCP endpoint.
+
+## AWS Builder mapping
+
+Amazon Bedrock (Converse API, `amazon.nova-lite-v1:0` in `us-west-2`) compiles a person's natural-language
+rule into a **candidate** structured rule with a plain-English read-back. Code validates the schema,
+a person confirms it, and only then does it become policy. Obvious policy-changing input is rejected
+by a deterministic guard before the model sees it, and a per-session daily call/token cap falls back
+to the deterministic compiler. See [Bedrock setup](#amazon-bedrock).
+
+## Open Source
+
+PACT is released under the [MIT License](LICENSE) (Copyright (c) 2026 Siva Surya Chandran). This
+repository does **not** claim the Open Source mini-challenge: no qualifying new contribution to an
+existing open-source project was made during the hackathon.
+
+## Reproduce a clean local run
+
+Verified with Python 3.14.7, Node v26.10.0 and npm 11.19.1 (Python 3.11+ is declared supported;
+dependencies are pinned in `requirements.lock`, with `mcp==2.3.0`). No credentials are needed.
 
 ```bash
+git clone https://github.com/sivasuryachandran/pact.git && cd pact
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-npm install
+.venv/bin/python -m pip install -r requirements.txt     # or -r requirements.lock for exact versions
+npm ci && npm ci --prefix pact-signal
 npm run build
 PACT_BEDROCK_ENABLED=0 PACT_PAYMENT_PROVIDER=mock .venv/bin/python -m pact.server
 ```
 
-Open <http://127.0.0.1:8787>, register an account, create a household, and
-use the normal invite flow for additional members. For the shortest proof,
-run the verified browser suite against a fresh normal-mode server:
+Open <http://127.0.0.1:8787>, register an account, create a household, and invite members. The MCP
+endpoint is <http://127.0.0.1:8787/mcp>; health is <http://127.0.0.1:8787/health>.
+
+**Verify everything with one command** (starts a throwaway server with a temporary SQLite database,
+needs no credentials, prints PASS/FAIL per step, exits nonzero on any failure):
 
 ```bash
-PACT_E2E_BASE_URL=http://127.0.0.1:8925 npm run test:e2e:real
+npx playwright install chromium        # once, for the browser suites
+scripts/verify_submission.sh           # VERIFY_SKIP_BROWSER=1 skips the Playwright suites
 ```
 
-That suite includes the cross-member Maya → Siva → Leo MCP purchase journey.
-
-## What is real, and what is simulated
-
-Real in this prototype: local account sessions, household memberships and
-invites, authenticated Streamable HTTP MCP calls, deterministic authorization,
-cross-member approval, exact-action token binding, mock order state, and
-tamper-evident receipts.
-
-Simulated or unclaimed: Alexa+ partner access, Alexa/Echo hardware, live
-microphone guarantees, Amazon.com purchases, real bookings, smart-home or Fire
-TV control, and production identity assurance. Payments use the verified mock
-provider. An Amazon Pay Sandbox adapter exists as an optional boundary but is
-not verified end-to-end and must not be presented as working checkout.
-
-## Run locally
+Docker (local only):
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-cp .env.example .env                 # optional; never put credentials in it
-PACT_BEDROCK_ENABLED=0 .venv/bin/python -m pact.server
+docker build -t pact .
+docker run --rm -p 127.0.0.1:8787:8787 -e PACT_TOKEN_SECRET="$(openssl rand -hex 32)" \
+  -e PACT_ALLOWED_ORIGINS=http://127.0.0.1:8787 pact
 ```
 
-Open <http://127.0.0.1:8787>. Health is <http://127.0.0.1:8787/health> and
-the MCP Streamable HTTP endpoint is <http://127.0.0.1:8787/mcp>.
+## Verified results (run of 2026-10-22)
+
+Counts come from the actual runs recorded in [reports/submission-readiness-final.md](reports/submission-readiness-final.md).
+
+| Check | Result |
+|---|---|
+| `npm run build` | PASS |
+| `pytest` | **127 passed** |
+| Bypass/security suite | **240 adversarial attempts, 0 bypasses, 0 unauthorized executions** |
+| Laptop purchase flow over HTTP + MCP (`scripts/submission_flow.py`) | **55 of 55 steps PASS** (five accounts, five separate sessions) |
+| MCP SDK client (`scripts/mcp_sdk_check.py`) | PASS: SDK 2.3.0, protocol 2025-11-25, 22 tools listed, authenticated `tools/call` |
+| Signal unit tests / signal Playwright | 7 passed / 1 passed |
+| Real-account browser E2E (`npm run test:e2e:real`) | **6 passed** (invites and pairing, product discovery and ordering, MCP commerce, cross-session approval, the two-session laptop demo, five-account household) |
+| Bedrock (live, `amazon.nova-lite-v1:0`, `us-west-2`) | candidate rule returned with `compiler=bedrock`; a policy-override attempt returned a clarification |
+
+---
+
+## Reference
+
+The sections below document individual subsystems.
 
 ## Premium UI and pact-signal
 
@@ -93,8 +166,7 @@ npm run e2e:signal         # Playwright demo states, flight, morphs, screenshots
 ```
 
 The local demo screenshots, performance measurements, and browser verification
-are in [reports/ui-verification.md](reports/ui-verification.md) and
-`pact-signal/reports/`. The Stitch MCP connector was not available in the
+are in `pact-signal/reports/`. The Stitch MCP connector was not available in the
 implementation session, so no Stitch response or supplied API key was used.
 
 The browser experience uses local account authentication with scrypt password
@@ -290,7 +362,7 @@ real identity verification. The normal product mode does not expose
 For deterministic development/test fixtures only:
 
 ```bash
-curl -c /tmp/pact-cookies.txt \
+curl -c cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"member_id":"maya"}' \
   http://127.0.0.1:8787/api/demo-login
@@ -459,7 +531,7 @@ It uses CSS/HTML radial light, glass depth, a floor reflection, and a speaking
 waveform only; it does not imitate Alexa’s voice or use Amazon/Echo branding or
 copied assets.
 
-The **Run Maya Demo** button replays:
+The **Run Maya Demo** button replays the original *secondary* birthday-plan demo (VenueBook and GiftCart mock add-ons). The primary demo is the laptop flow above.
 
 1. “Plan Maya’s birthday under $150.”
 2. “Book Funzone.” → VenueBook returns `ask` for $120.
@@ -508,44 +580,28 @@ claim Alexa+ integration or live Alexa hardware access.
 ## Tests
 
 ```bash
-caffeinate -dimsu .venv/bin/pytest -ra
-caffeinate -dimsu .venv/bin/pytest -q -s tests/test_bypass.py
-.venv/bin/python scripts/mcp_smoke.py
-npm run test:signal
-npm run e2e:signal
-# with a fresh normal-mode server and PACT_E2E_BASE_URL set:
-npm run test:e2e:real
+.venv/bin/python -m pytest                         # policy, MCP, identity, marketplace, product discovery, memory, TTS, Alexa adapter, live HTTP+MCP flow
+.venv/bin/python -m pytest -q -s tests/test_bypass.py   # 240 adversarial attempts
+PACT_URL=http://127.0.0.1:8787 .venv/bin/python scripts/mcp_sdk_check.py   # official MCP SDK client
+PACT_URL=http://127.0.0.1:8787 .venv/bin/python scripts/submission_flow.py # laptop purchase flow, 55 steps
+npm run test:signal && npm run e2e:signal
+PACT_E2E_BASE_URL=http://127.0.0.1:8787 npm run test:e2e:real   # needs a fresh normal-mode server
+scripts/verify_submission.sh                       # all of the above against a throwaway server
 ```
 
-The identity/security regression suite covers five independent sessions,
-profile isolation, role denial, cross-session and cross-household token
-failures, logout invalidation, approval revocation, concurrent approval
-supersession, and cumulative budget enforcement. The latest run passed 111 Python tests, 240 adversarial
-attempts with 0 bypasses, and 7 signal tests.
+`tests/test_submission_flow.py` starts a normal-mode server in a subprocess (seeded demo identities
+disabled) and runs the full flow, so the core suite exercises real accounts, real sessions and real MCP
+calls. CI (`.github/workflows/ci.yml`) runs the build, the Python and bypass suites, the signal tests and
+the full browser verification on every push and pull request, with no AWS credentials.
 
-Current local evidence:
-
-```text
-pytest: 118 passed
-legitimate decisions: allow 1, approval-required 1, deny 1
-adversarial suite: 240 attempts, 0 bypasses, 0 unauthorized executions
-MCP SDK: 2.3.0
-negotiated protocol: 2025-11-25
-browser MCP commerce: PASS; 5 real-account E2E tests, including discovery, ordering, and cross-member approval
-product discovery: PASS; deterministic laptop parsing, evidence, comparison, and exact-order binding
-voice/memory/Alexa slice: PASS; 5 memory + 4 TTS + 1 MCP + 3 adapter tests
-```
-
-The suite covers compiler phrasings, confirmation, precedence, fail-safe
-defaults, private surfaces, HMAC tampering/expiry/replay, exact approval
-binding, concurrent one-time execution, SQLite isolation, plan budgets,
-synthetic Policy Preview, MCP tool registration, and the 240-attempt bypass
-suite. The executor refuses every missing, forged, expired, replayed,
-parameter-modified, stale, denied, or unapproved token.
+The identity/security regression suite covers five independent sessions, profile isolation, role denial,
+cross-session and cross-household token failures, logout invalidation, approval revocation, concurrent
+approval supersession and cumulative budget enforcement. Executed numbers are in the
+[results table above](#verified-results-run-of-2026-10-22).
 
 ## MCP surface
 
-The official Python MCP SDK exposes these tools: `get_rules`, `propose_rule`,
+The official Python MCP SDK (2.3.0) exposes these tools (`tools/list` is authoritative; the verification run reports the live count): `get_rules`, `propose_rule`,
 `confirm_rule`, `check_action`, `request_approval`, `approve`,
 `execute_action`, `get_receipts`, `search_catalog`, `get_product`,
 `compare_products`, `get_availability`, `get_product_reviews`,
@@ -558,7 +614,7 @@ trace is explicitly labeled `SERVER-RECORDED MCP TRACE` and is populated from
 persisted MCP boundary events with redacted arguments and results.
 
 Product discovery and controlled ordering evidence is recorded in
-[reports/product-discovery-ordering-verification.md](reports/product-discovery-ordering-verification.md).
+[reports/submission-readiness-final.md](reports/submission-readiness-final.md).
 
 ## Security boundary
 
@@ -571,31 +627,25 @@ happen outside the model.
 
 ## Container and deployment
 
-`Dockerfile` and `.dockerignore` are included. Docker Desktop 29.8.0 built and
-ran the image locally; `/health`, the UI, and container MCP smoke passed. See
-[reports/deployment-status.md](reports/deployment-status.md) for the public
-HTTPS blocker and exact commands.
+`Dockerfile` and `.dockerignore` are included. An earlier build of the image ran locally under
+Docker Desktop 29.8.0 (`/health`, the UI and an MCP smoke passed). **The final submission verification did
+not run Docker** because the Docker daemon was not running, so the current image is untested. There is no
+public HTTPS deployment and no public MCP endpoint is claimed.
 
 Strands is `NOT RUN` because its Python package is unavailable in `.venv`.
 AgentCore is `NOT RUN` because the CLI is unavailable and no resource was
 created. The deterministic planner remains the honest fallback.
 
-Voice QA is documented in [reports/voice-qa.md](reports/voice-qa.md). Chrome
+Voice: Chrome
 155.0.8059.80 is installed and the UI wiring is present, but live microphone
 capture and audible speech were not independently verified by this
 non-interactive runner.
 
 ## Submission artifacts
 
-- [reports/security-results.md](reports/security-results.md)
-- [reports/mcp-bedrock.md](reports/mcp-bedrock.md)
-- [reports/mcp-commerce-verification.md](reports/mcp-commerce-verification.md)
-- [reports/overnight-status.md](reports/overnight-status.md)
-- [reports/deployment-status.md](reports/deployment-status.md)
-- [reports/product-feedback.md](reports/product-feedback.md)
-- [reports/friction-log.md](reports/friction-log.md)
-- [demo/final-story.md](demo/final-story.md)
-- [demo/demo-script.md](demo/demo-script.md)
+- [docs/judge-quickstart.md](docs/judge-quickstart.md): five-minute judge walkthrough
+- [docs/friction-log.md](docs/friction-log.md): problems hit while building, with workarounds and suggestions
+- [reports/submission-readiness-final.md](reports/submission-readiness-final.md): exact commands, counts and claims
+- [ARCHITECTURE.md](ARCHITECTURE.md)
 
-See [PACT_FINAL_STRESS_TEST.md](PACT_FINAL_STRESS_TEST.md) for the source of
-truth. It was not modified.
+`PACT_FINAL_STRESS_TEST.md` is the original stress-test source document and is intentionally unmodified.
