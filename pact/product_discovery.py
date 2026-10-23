@@ -94,8 +94,8 @@ def parse_product_query(text: str, structured: dict[str, Any] | None = None) -> 
             if structured.get(key) is not None:
                 values[key] = int(structured[key])
 
-    budget_max = re.search(r"(?:under|below|less than|up to|within|max(?:imum)?(?: of)?)\s*\$?([\d,]+(?:\.\d{1,2})?)", lower)
-    budget_min = re.search(r"(?:at least|over|above|more than|min(?:imum)?(?: of)?)\s*\$?([\d,]+(?:\.\d{1,2})?)", lower)
+    budget_max = re.search(r"(?:under|below|less than|up to|within|max(?:imum)?(?: of)?)\s*\$?(\d[\d,]*(?:\.\d{1,2})?)", lower)
+    budget_min = re.search(r"(?:at least|over|above|more than|min(?:imum)?(?: of)?)\s*\$?(\d[\d,]*(?:\.\d{1,2})?)", lower)
     if budget_max:
         values["budget_max_cents"] = _money(budget_max.group(1))
     if budget_min:
@@ -133,7 +133,9 @@ def parse_product_query(text: str, structured: dict[str, Any] | None = None) -> 
         values["operating_system"] = "macos"
     elif "windows" in lower or "win 11" in lower:
         values["operating_system"] = "windows"
-    if any(term in lower for term in ("gaming", "games", "game")):
+    if any(term in lower for term in ("python", "development", "developer", "coding", "programming", "software engineering")):
+        values["use_case"] = "development"
+    elif any(term in lower for term in ("gaming", "games", "game")):
         values["use_case"] = "gaming"
     elif any(term in lower for term in ("school", "study", "student")):
         values["use_case"] = "school"
@@ -146,6 +148,10 @@ def parse_product_query(text: str, structured: dict[str, Any] | None = None) -> 
     for phrase, key in (("prefer", "preference"), ("ideally", "ideal"), ("would like", "preference"), ("nice to have", "nice_to_have")):
         if phrase in lower:
             soft[key] = True
+    if re.search(r"\b(good|long|great|strong|solid|all[- ]day)\s+battery(?:\s+life)?\b", lower):
+        soft["battery_life"] = "good"          # soft: ranks higher at >= 10 hours, never excludes
+    if re.search(r"\b(strong|good|great|solid|excellent|high)\s+(?:customer\s+)?reviews?\b|\bhighly[- ]rated\b|\bwell[- ]reviewed\b", lower):
+        soft["reviews"] = "strong"             # soft: rating >= 4.3 with >= 500 reviews, from provider data only
     unknown: list[str] = []
     if "touchscreen" in lower:
         unknown.append("touchscreen")
@@ -218,10 +224,13 @@ def _product(
 LAPTOPS: tuple[dict[str, Any], ...] = (
     _product("pact-laptop-lenovo-14", "Lenovo-style ThinkPad 14", "lenovo", 129900, "lenovo-14-r3", ram=16, storage=512, screen=14, weight=3.3, battery=12, operating_system="windows", cpu="Core Ultra 5", gpu="integrated", use_cases=("work", "school"), availability="in_stock", rating=4.5, review_count=1240, review_summary="Provider-supplied summary: dependable keyboard and long battery life."),
     _product("pact-laptop-dell-15", "Dell-style Latitude 15", "dell", 109900, "dell-15-r2", ram=16, storage=512, screen=15.6, weight=3.8, battery=10, operating_system="windows", cpu="Core Ultra 5", gpu="integrated", use_cases=("work", "school"), availability="in_stock", rating=4.3, review_count=870, review_summary="Provider-supplied summary: practical performance for everyday work."),
-    _product("pact-laptop-hp-14", "HP-style Pavilion 14", "hp", 89900, "hp-14-r4", ram=16, storage=512, screen=14, weight=3.4, battery=9, operating_system="windows", cpu="Ryzen 7", gpu="integrated", use_cases=("school", "work"), availability="in_stock", rating=4.2, review_count=512, review_summary=None),
+    _product("pact-laptop-hp-14", "HP-style Pavilion 14", "hp", 89900, "hp-14-r4", ram=16, storage=512, screen=14, weight=3.4, battery=9, operating_system="windows", cpu="Ryzen 7", gpu="integrated", use_cases=("development", "school", "work"), availability="in_stock", rating=4.2, review_count=512, review_summary=None),
     _product("pact-laptop-asus-gaming", "ASUS-style Creator 15", "asus", 149900, "asus-15-r1", ram=32, storage=1024, screen=15.6, weight=4.4, battery=8, operating_system="windows", cpu="Ryzen 7", gpu="RTX 4060", use_cases=("gaming", "work"), availability="in_stock", rating=4.6, review_count=301, review_summary="Provider-supplied summary: strong graphics performance for the price."),
     _product("pact-laptop-apple-air", "Apple-style Air 13", "apple", 119900, "apple-air-r2", ram=16, storage=512, screen=13.6, weight=2.7, battery=15, operating_system="macos", cpu="M3", gpu="integrated", use_cases=("work", "school"), availability="unknown", rating=4.7, review_count=2100, review_summary="Provider-supplied summary: quiet, light, and long lasting."),
     _product("pact-laptop-acer-15", "Acer-style Aspire 15", "acer", 69900, "acer-15-r1", ram=8, storage=256, screen=15.6, weight=4.0, battery=8, operating_system="windows", cpu="Core i5", gpu="integrated", use_cases=("school"), availability="out_of_stock", rating=None, review_count=None, review_summary=None),
+    _product("pact-laptop-lenovo-ideapad-15", "Lenovo-style IdeaPad 15", "lenovo", 79900, "lenovo-ideapad-15-r1", ram=16, storage=512, screen=15.6, weight=3.9, battery=11, operating_system="windows", cpu="Ryzen 5", gpu="integrated", use_cases=("development", "school", "work"), availability="in_stock", rating=4.4, review_count=1980, review_summary="Provider-supplied summary: comfortable keyboard and steady battery life for coding."),
+    _product("pact-laptop-asus-vivobook-14", "ASUS-style Vivobook 14", "asus", 84900, "asus-vivobook-14-r1", ram=16, storage=512, screen=14, weight=3.1, battery=9, operating_system="windows", cpu="Core i5", gpu="integrated", use_cases=("school", "work"), availability="in_stock", rating=4.1, review_count=640, review_summary="Provider-supplied summary: light and quick, average battery."),
+    _product("pact-laptop-acer-swift-14", "Acer-style Swift 14", "acer", 87900, "acer-swift-14-r2", ram=16, storage=512, screen=14, weight=2.8, battery=13, operating_system="windows", cpu="Ryzen 7", gpu="integrated", use_cases=("development", "work"), availability="unknown", rating=4.6, review_count=910, review_summary="Provider-supplied summary: light, fast and long lasting."),
 )
 
 
@@ -310,10 +319,27 @@ def _result(product: dict[str, Any], query: ProductQuery, matched: list[str], un
     score = max(0, min(100, int(round((len(matched) / hard_count) * 100))))
     reasons = [f"matched {key.replace('_', ' ')}" for key in matched]
     reasons.extend(f"tradeoff: {key.replace('_', ' ')}" for key in unmet + unknown)
+    specs = product.get("specifications", {})
+    soft_matched: list[str] = []
+    soft_unmet: list[str] = []
+    if query.soft_constraints.get("battery_life") == "good":
+        (soft_matched if specs.get("battery_hours", 0) >= 10 else soft_unmet).append("battery_life")
+        reasons.append(f"battery life {specs.get('battery_hours')} h (soft preference: 10 h or more)")
+    if query.soft_constraints.get("reviews") == "strong":
+        rating, count = product.get("rating"), product.get("review_count")
+        if rating is None or count is None:
+            soft_unmet.append("reviews")
+            reasons.append("reviews: no provider rating available (not guessed)")
+        else:
+            (soft_matched if rating >= 4.3 and count >= 500 else soft_unmet).append("reviews")
+            reasons.append(f"reviews: {rating} from {count} provider ratings (soft preference: 4.3+ with 500+)")
+    if query.use_case and query.use_case in specs.get("use_cases", []):
+        soft_matched.append("use_case")
+        reasons.append(f"listed for {query.use_case}")
     if not reasons:
         reasons.append("baseline catalog fit")
     value = copy.deepcopy(product)
-    value.update({"fit_score": score, "matched_constraints": matched, "unmet_constraints": unmet, "unknown_constraints": unknown, "tradeoffs": unmet + unknown, "ranking_reasons": reasons, "evidence": _evidence(product)})
+    value.update({"fit_score": score, "matched_constraints": matched, "unmet_constraints": unmet, "unknown_constraints": unknown, "tradeoffs": unmet + unknown, "ranking_reasons": reasons, "soft_matched": soft_matched, "soft_unmet": soft_unmet, "evidence": _evidence(product)})
     return value
 
 
@@ -328,7 +354,7 @@ def search_products(query: ProductQuery, limit: int = 20, provider: CatalogProvi
             continue
         result = _result(product, query, matched, unmet, unknown)
         ranked.append((int(result["fit_score"]), str(product["product_id"]), result))
-    ranked.sort(key=lambda item: (-item[0], 0 if item[2].get("availability") == "in_stock" else 1, item[1]))
+    ranked.sort(key=lambda item: (-item[0], -len(item[2].get("soft_matched", [])), 0 if item[2].get("availability") == "in_stock" else 1, item[1]))
     try:
         configured_max = max(1, min(int(os.getenv("PRODUCT_CATALOG_MAX_RESULTS", "20")), 20))
     except ValueError:

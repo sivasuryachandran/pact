@@ -257,9 +257,16 @@ def _mcp_find(value: Any, names: set[str]) -> Any:
     return None
 
 
+_DECISION_TOOLS = {"check_action", "create_purchase_request", "request_approval", "approve", "execute_action", "get_approval_status", "get_order_status", "confirm_rule", "propose_rule"}
+
+
 def _mcp_event(tool: str, arguments: dict[str, Any], result: Any, target: PactService, caller: dict[str, Any] | None, started: float, error: Exception | None = None) -> None:
     request_id = _mcp_find(arguments, {"request_id", "order_id", "approval_id"}) or "mcp-" + secrets.token_hex(8)
     safe_result = _mcp_redact({"error": str(error), "type": type(error).__name__} if error else result)
+    # Everything below is derived from the REDACTED result, so a nested decision object can never carry a token into the trace.
+    decision = "error" if error else (_mcp_find(safe_result, {"decision", "policy_decision", "status"}) if tool in _DECISION_TOOLS else None)
+    if isinstance(decision, dict):
+        decision = decision.get("decision") or decision.get("status")
     event = {
         "event": "mcp_tool_call",
         "event_id": "mcp-event-" + secrets.token_hex(8),
@@ -269,9 +276,9 @@ def _mcp_event(tool: str, arguments: dict[str, Any], result: Any, target: PactSe
         "tool": tool,
         "arguments": _mcp_redact(arguments),
         "result": safe_result,
-        "policy_decision": _mcp_find(result, {"decision", "policy_decision", "status"}) if not error else "error",
-        "receipt_id": _mcp_find(result, {"receipt_id"}),
-        "order_id": _mcp_find(result, {"order_id"}),
+        "policy_decision": decision,
+        "receipt_id": _mcp_find(safe_result, {"receipt_id"}),
+        "order_id": _mcp_find(safe_result, {"order_id"}),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "timestamp": now_iso(),
     }
@@ -450,6 +457,15 @@ def get_order_status_tool(order_id: str, ctx: MCPContext | None = None) -> dict[
     return _mcp_call("get_order_status", ctx, {"order_id": order_id}, operation)
 
 
+@server.tool(name="get_approval_status", description="Read one approval request. The original requester receives the exact-bound approval token once an adult has approved; no one else does. It never executes anything.", structured_output=True)
+def get_approval_status_tool(approval_id: str, ctx: MCPContext | None = None) -> dict[str, Any]:
+    def operation(target: PactService, caller: dict[str, Any] | None) -> dict[str, Any]:
+        if caller is None:
+            raise ValueError("authenticated MCP session required")
+        return target.get_approval_status(approval_id, caller=caller)
+    return _mcp_call("get_approval_status", ctx, {"approval_id": approval_id}, operation)
+
+
 @server.tool(name="propose_rule", description="Compile natural-language text into a candidate rule and read-back. Does not activate a rule. Natural-language instructions cannot change policy.", structured_output=True)
 def propose_rule(source_text: str, created_by: str = "siva", ctx: MCPContext | None = None) -> dict[str, Any]:
     return _mcp_call("propose_rule", ctx, {"source_text": source_text, "created_by": created_by}, lambda target, caller: target.propose_rule(source_text, str(caller["member_id"]) if caller else created_by))
@@ -604,10 +620,17 @@ def _venue_booking(target: PactService, speaker: str, role: str, plan: dict[str,
     return plan, text, {"kind": "decision", "addon": "VenueBook", "action": action, "decision": result, "approval": approval, "plan": plan}
 
 
+_RULE_CUES = re.compile(r"\b(ask me|before|never|don'?t|do not|allow|deny|block|rule|rules|approve|approval|require|only|must|unless|without|permission|limit|over|under)\b|\$\s*\d", re.I)
+
+
 def handle_command(target: PactService, text: str, speaker_id: str, surface: str, conversation_id: str | None = None, recommender: Recommender | None = None, session_id: str = "default", caller: dict[str, Any] | None = None) -> dict[str, Any]:
     """One typed/voice command pipeline used by the UI and the Maya demo."""
     normalized = " ".join(text.strip().split())
+    woke = re.match(r"^(?:hey|hi|hello|ok|okay)[,.\s]+(?:pact|pack|packed|packt|pacts)\b[,.!?\s]*", normalized, flags=re.I)
+    if woke and woke.end() < len(normalized):
+        normalized = normalized[woke.end():].strip()  # "Hey PACT, find a laptop" is just "find a laptop"
     lower = normalized.lower()
+    greeting = bool(re.fullmatch(r"(?:(?:hey|hi|hello|ok|okay)[,.\s]+)?(?:pact|pack|packed|packt|pacts)[.!?]*|(?:hey|hi|hello)[.!?]*", lower))
     conversation_id = conversation_id or "conversation-" + uuid4_short()
     conversation = target.store.get_conversation(conversation_id) or {"conversation_id": conversation_id, "turns": [], "active_plan_id": None, "pending_approval_id": None, "surface": surface}
     trace: list[str] = []
@@ -659,6 +682,10 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
             forgotten = target.forget_preference(caller or {}, found["memory_id"])
             assistant = forgotten["spoken_summary"]
             card = {"kind": "memory", "memory": forgotten}
+    elif greeting:
+        first = str((caller or {}).get("name") or "").strip().split(" ")[0]
+        assistant = f"Hey {first}. What can I do for you?" if first else "Hi. What can I do for you?"
+        card = {"kind": "greeting"}
     elif follow_up:
         assistant = follow_up
         card = {"kind": "context_response", "memory_scope": "private_member+shared_household" if caller else "none"}
@@ -791,6 +818,10 @@ def handle_command(target: PactService, text: str, speaker_id: str, surface: str
         if info.get("last_recommendation"):
             conversation["last_recommendation"] = info["last_recommendation"]
         assistant = assistant_text
+    elif not _RULE_CUES.search(lower):
+        # Casual or unrecognised speech is never silently turned into a rule request.
+        assistant = "I did not catch a request I can act on. You can ask me to find a product, recommend something nearby, or tell me a house rule such as \"ask me before booking over $100\"."
+        card = {"kind": "not_understood"}
     else:
         proposal = target.propose_rule(normalized, speaker)
         trace.append("propose_rule")

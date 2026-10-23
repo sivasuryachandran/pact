@@ -469,3 +469,27 @@ button:focus-visible::after{opacity:.75}
 .st-memory-row {
   min-width: 480px;
 }
+.mcp-handshake{display:grid;gap:4px;padding:12px 14px;margin-bottom:12px;border:1px solid #ffffff1a;border-radius:12px;background:#ffffff08;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#c0c9d9}
+
+.approval-dock{position:fixed;right:20px;bottom:20px;z-index:40;display:grid;gap:12px;width:min(420px,calc(100vw - 40px))}
+.dock-card{display:grid;gap:8px;padding:16px 18px;border:1px solid #fbbf2455;border-radius:16px;background:linear-gradient(145deg,#171a26f2,#0b0b0ff5);box-shadow:0 24px 80px #000b;backdrop-filter:blur(18px)}
+.dock-card strong{font-size:16px}.dock-card p{margin:0;font-size:13px;color:#a1a1aa;line-height:1.5}.dock-note{color:#fb7185!important}
+.bound-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:4px 0}.bound-fields div{display:grid;gap:2px}.bound-fields dt{font:10.5px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;color:#71717a}.bound-fields dd{margin:0;font-size:12.5px;word-break:break-all}
+.dock-actions{display:flex;gap:10px;flex-wrap:wrap}.dock-actions button,.dock-card .secondary-action{padding:9px 14px;border-radius:10px}
+
+/* Compact conversation log: hidden until there are messages, small and internally scrolling so the page keeps its original height. */
+.typed-chat-dock{position:relative}
+/* The message list sits on top of the dock and grows upward as messages arrive, then scrolls once it reaches its maximum. */
+.chat-log{position:absolute;left:0;right:0;bottom:calc(100% + 8px);max-height:min(300px,30vh);overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid #ffffff1c;border-radius:18px;background:linear-gradient(145deg,#111b2cf2,#0a101cf2);box-shadow:0 20px 60px #02061766;backdrop-filter:blur(22px);scroll-behavior:smooth;z-index:5}
+.chat-log:empty{display:none}
+.chat-bubble{max-width:90%;padding:5px 10px;border-radius:12px;font-size:12px;line-height:1.35;display:block;background:rgba(148,163,184,.12);color:#e2e8f0;align-self:flex-start;border:1px solid rgba(148,163,184,.18)}
+.chat-bubble b{font-size:9px;letter-spacing:.12em;text-transform:uppercase;opacity:.6;margin-right:6px}
+.chat-bubble.you{align-self:flex-end;background:rgba(124,92,255,.22);border-color:rgba(167,139,250,.35)}
+
+/* Fit the Home screen: the sphere area flexes with the window so the voice dock stays on screen (not pushed down by the chat). */
+@media(min-width:761px){
+  .home-minimal .signal-stage{height:clamp(250px,calc(100vh - 575px),460px)!important;min-height:250px!important}
+  .home-minimal .pact-core-sphere{height:100%!important;max-height:460px;transform:none!important}
+  .voice-dock{margin-top:10px!important}
+}
+@media(max-width:760px){.chat-log{position:static;max-height:150px;margin-bottom:8px}}

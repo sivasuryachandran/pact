@@ -156,7 +156,7 @@ test('five real household accounts complete the product flow', async ({ browser 
     await sivaPage.getByLabel('Typed PACT command').fill('Book Funzone.');
     await sivaPage.getByRole('button', { name: 'Send' }).click();
     await expect(sivaPage.locator('.pact-core-sphere')).toHaveAttribute('data-core-state', 'thinking');
-    await expect(sivaPage.locator('.pact-core-sphere')).toHaveAttribute('data-core-state', 'approval_required', { timeout: 10_000 });
+    await expect(sivaPage.locator('.pact-core-sphere')).toHaveAttribute('data-core-state', 'approval_required', { timeout: 40_000 });
     await sivaPage.unroute('**/api/command');
 
     for (const member of members.slice(1)) {

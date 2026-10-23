@@ -499,6 +499,8 @@ class PactService:
             "member_id": action.get("member_id", ""),
             "session_id": action.get("session_id", ""),
             "created_at": now_iso(),
+            # What the approver is being asked to approve. Display only: the signed request hash is what binds it.
+            "bound": {key: action.get(key) for key in ("product_id", "product_revision", "amount_cents", "currency", "quantity", "payment_method_id", "device_id", "member_id", "household_id", "provider", "shipping_option", "merchant", "rule_version") if action.get(key) not in (None, "")},
         }
         self.store.save_approval(approval)
         self._track_plan_action(action, "pending", "ask")
@@ -527,6 +529,22 @@ class PactService:
                 self.store.add_trust_event({"event": "approval", "approval_id": approval_id, "action_hash": approval["request_hash"], "action": approval.get("action", ""), "beneficiary": approval.get("beneficiary", ""), "approver": approver, "timestamp": now_iso()})
             token = self.tokens.issue_approval(approval) if approved else None
             return {"approval": approval, "approval_token": token}
+
+    def get_approval_status(self, approval_id: str, caller: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Status of one approval. Only the original requester receives the approval token, and only once an adult
+        has approved. The token is bound to the exact request; it is not an authorization by itself, because
+        execution still needs the requester's own decision token and re-verifies everything."""
+        approval = self.store.get_approval(str(approval_id))
+        if not approval or (caller and approval.get("household_id") != caller.get("household_id")):
+            raise ValidationError("approval request not found")
+        is_requester = caller is None or str(caller.get("member_id")) == str(approval.get("member_id"))
+        is_approver = caller is not None and str(caller.get("member_id")) == str(approval.get("approver"))
+        if not (is_requester or is_approver):
+            raise ValidationError("approval request not found")
+        result: dict[str, Any] = {"approval": copy.deepcopy(approval)}
+        if approval.get("status") == "approved" and is_requester:
+            result["approval_token"] = self.tokens.issue_approval(approval)
+        return result
 
     def _cumulative_spending(self, action: dict[str, Any]) -> int:
         period = str(action.get("spending_period", "")).lower()

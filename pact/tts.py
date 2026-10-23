@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,12 +28,13 @@ class TTSConfig:
     engine: str = "neural"
     voice_id: str = "Joanna"
     cache_dir: str = ".pact-cache/tts"
+    rate: str = "88%"
     max_chars: int = 1200
     cache_ttl_seconds: int = 7 * 24 * 60 * 60
 
     @classmethod
     def from_env(cls) -> "TTSConfig":
-        provider = os.getenv("PACT_TTS_PROVIDER", "browser").strip().lower()
+        provider = os.getenv("PACT_TTS_PROVIDER", "auto").strip().lower()
         if provider not in {"browser", "polly", "auto"}:
             provider = "browser"
         return cls(
@@ -41,6 +43,7 @@ class TTSConfig:
             engine=os.getenv("PACT_POLLY_ENGINE", "neural"),
             voice_id=os.getenv("PACT_POLLY_VOICE_ID", "Joanna"),
             cache_dir=os.getenv("PACT_TTS_CACHE_DIR", ".pact-cache/tts"),
+            rate=os.getenv("PACT_POLLY_RATE", "88%"),
             max_chars=max(120, min(5000, int(os.getenv("PACT_TTS_MAX_CHARS", "1200")))),
             cache_ttl_seconds=max(60, int(os.getenv("PACT_TTS_CACHE_TTL_SECONDS", str(7 * 24 * 60 * 60)))),
         )
@@ -61,8 +64,15 @@ def safe_ssml(text: str) -> str:
     return f"<speak>{html.escape(text, quote=False)}</speak>"
 
 
+def conversational_ssml(text: str, rate: str = "88%") -> str:
+    """Slower, assistant-like delivery: a calm rate and a short breath between sentences."""
+    sentences = re.findall(r"[^.!?]+[.!?]+|[^.!?]+$", text) or [text]
+    body = '<break time="380ms"/>'.join(html.escape(part.strip(), quote=False) for part in sentences if part.strip())
+    return f'<speak><prosody rate="{rate}">{body}</prosody></speak>'
+
+
 def cache_key(config: TTSConfig, text: str, locale: str = "en-US") -> str:
-    canonical = json.dumps({"provider": "polly", "engine": config.engine, "voice": config.voice_id, "locale": locale, "ssml_version": "1", "text": normalize_text(text, config.max_chars)}, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps({"provider": "polly", "engine": config.engine, "voice": config.voice_id, "locale": locale, "ssml_version": "2", "text": normalize_text(text, config.max_chars)}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -112,7 +122,7 @@ class PollyProvider:
         if not personalized and cache_path.exists():
             return {"provider": "polly", "fallback": False, "available": True, "cached": True, "content_type": "audio/mpeg", "cache_key": key, "audio": cache_path.read_bytes()}
         try:
-            response = self._client().synthesize_speech(Text=safe_ssml(normalized), TextType="ssml", OutputFormat="mp3", VoiceId=self.config.voice_id, Engine=self.config.engine, LanguageCode=locale)
+            response = self._client().synthesize_speech(Text=conversational_ssml(normalized, self.config.rate) if self.config.engine != "generative" else safe_ssml(normalized), TextType="ssml", OutputFormat="mp3", VoiceId=self.config.voice_id, Engine=self.config.engine, LanguageCode=locale)
             body = response.get("AudioStream")
             audio = body.read() if body is not None else b""
             if not audio:

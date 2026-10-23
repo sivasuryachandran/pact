@@ -1,3 +1,5 @@
+import pytest
+
 from pact.canonical import action_hash
 from pact.product_discovery import (
     compare_products,
@@ -6,6 +8,8 @@ from pact.product_discovery import (
     reviews,
     search_products,
 )
+from pact.permissions import PermissionError as PactPermissionError
+from pact.schemas import ValidationError
 from pact.service import PactService
 from pact.state import StateStore
 from pact.tokens import TokenManager
@@ -112,3 +116,87 @@ def test_every_purchase_binding_mutation_is_refused_before_execution():
     for changes in ({"product_revision": "dell-15-stale"}, {"quantity": 2, "amount_cents": request["request"]["amount_cents"] * 2}, {"shipping_option": "expedited"}, {"payment_method_id": "pm-other"}, {"rule_version": 99}, {"product_id": "pact-laptop-asus-gaming"}):
         refused = service.execute_action({**request["request"], **changes}, request["decision"]["decision_token"], approved["approval_token"], caller=maya)
         assert refused["executed"] is False, changes
+
+
+DEMO_QUERY = "I need a laptop for Python development, 16 GB RAM minimum, under $900, good battery life, and strong reviews"
+
+
+def test_submission_demo_query_parses_filters_and_ranks_without_inventing_evidence():
+    query = parse_product_query(DEMO_QUERY)      # regression: "minimum," used to crash the budget parser
+    assert query.hard_constraints == {"budget_max_cents": 90000, "ram_gb_min": 16}
+    assert query.use_case == "development" and query.soft_constraints == {"battery_life": "good", "reviews": "strong"}
+    results = search_products(query)
+    assert len(results) >= 3 and all(r["price_cents"] <= 90000 and r["specifications"]["ram_gb"] >= 16 for r in results)
+    assert results[0]["soft_matched"] == ["battery_life", "reviews", "use_case"]
+    unknown = [r for r in results if r["availability"] == "unknown"]
+    assert unknown and all(r["availability"] == "unknown" for r in unknown)           # unknown stays unknown
+    no_summary = [r for r in results if r["review_summary"] is None]
+    assert all(r["review_text"] is None for r in results) and no_summary is not None   # no review text is invented
+
+
+def _approval_actors():
+    maya = {"household_id": "house-1", "member_id": "maya", "session_id": "maya-session", "role": "teen", "can_approve": False, "can_manage_rules": False, "can_access_private": False}
+    siva = {"household_id": "house-1", "member_id": "siva", "session_id": "siva-session", "role": "adult", "can_approve": True, "can_manage_rules": True, "can_access_private": True, "account_role": "owner"}
+    leo = {"household_id": "house-1", "member_id": "leo", "session_id": "leo-session", "role": "child", "can_approve": False, "can_manage_rules": False, "can_access_private": False}
+    return maya, siva, leo
+
+
+def test_only_the_requester_receives_the_approval_token_and_only_after_approval():
+    service = PactService(StateStore("house-1"), token_manager=TokenManager("approval-status-secret"))
+    maya, siva, leo = _approval_actors()
+    request = service.create_purchase_request("pact-laptop-lenovo-ideapad-15", caller=maya)
+    pending = service.request_approval(request["request"], request["decision"]["decision_token"], caller=maya)
+    approval_id = pending["approval"]["approval_id"]
+    assert pending["approval"]["bound"]["amount_cents"] == 79900 and pending["approval"]["bound"]["member_id"] == "maya"
+    assert "approval_token" not in service.get_approval_status(approval_id, caller=maya)       # still pending
+    service.approve(approval_id, "siva", caller=siva)
+    assert "approval_token" not in service.get_approval_status(approval_id, caller=siva)      # the approver is not the requester
+    with pytest.raises(ValidationError):
+        service.get_approval_status(approval_id, caller=leo)                                # other members cannot see it
+    token = service.get_approval_status(approval_id, caller=maya)["approval_token"]
+    executed = service.execute_action(request["request"], request["decision"]["decision_token"], token, caller=maya)
+    assert executed["executed"] is True
+
+
+def test_rejected_approval_never_yields_a_token_and_self_approval_is_refused():
+    service = PactService(StateStore("house-1"), token_manager=TokenManager("approval-reject-secret"))
+    maya, siva, _ = _approval_actors()
+    request = service.create_purchase_request("pact-laptop-lenovo-ideapad-15", caller=maya)
+    approval_id = service.request_approval(request["request"], request["decision"]["decision_token"], caller=maya)["approval"]["approval_id"]
+    with pytest.raises(PactPermissionError):
+        service.approve(approval_id, "maya", caller=maya)
+    service.approve(approval_id, "siva", approved=False, caller=siva)
+    status = service.get_approval_status(approval_id, caller=maya)
+    assert status["approval"]["status"] == "rejected" and "approval_token" not in status
+
+
+def test_wake_phrase_alone_is_a_greeting_not_a_rule_request():
+    import pact.server as srv
+
+    target = PactService(StateStore("house-1"), token_manager=TokenManager("wake-test-secret"))
+    for text in ("Hey PACT", "hey pact.", "Hi, PACT", "hello"):
+        reply = srv.handle_command(target, text, "maya", "living_room")
+        assert reply["assistant_text"] == "Hi. What can I do for you?", text
+    # "Hey PACT, <request>" is handled as the request, not as a greeting.
+    reply = srv.handle_command(target, "Hey PACT, what time is it", "maya", "living_room")
+    assert reply["assistant_text"] != "Hi. What can I do for you?"
+
+
+def test_unrecognised_speech_is_not_turned_into_a_rule_question():
+    import pact.server as srv
+
+    target = PactService(StateStore("house-1"), token_manager=TokenManager("fallback-test-secret"))
+    for text in ("Hey Pat", "banana river"):
+        reply = srv.handle_command(target, text, "maya", "living_room")
+        assert "Which supported action" not in reply["assistant_text"], text
+        assert reply["card"]["kind"] == "not_understood"
+    rule = srv.handle_command(target, "Ask me before booking anything over $100", "siva", "living_room")
+    assert rule["card"]["kind"] == "rule_candidate"
+
+
+def test_greeting_uses_the_signed_in_first_name():
+    import pact.server as srv
+
+    target = PactService(StateStore("house-1"), token_manager=TokenManager("name-test-secret"))
+    reply = srv.handle_command(target, "hey pact", "siva", "living_room", caller={"name": "Siva Surya Chandran", "member_id": "siva", "household_id": "house-1", "role": "adult", "session_id": "s"})
+    assert reply["assistant_text"] == "Hey Siva. What can I do for you?"

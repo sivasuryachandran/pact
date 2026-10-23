@@ -27,3 +27,22 @@ def test_mcp_action_results_are_voice_ready_without_tokens():
     execute = _mcp_voice_fields("execute_action", {"executed": False, "error": "token rejected", "decision_token": "secret"})
     assert execute["spoken_summary"] == "The action was refused. Nothing was executed."
 
+
+
+def test_mcp_trace_never_records_tokens_even_inside_nested_decisions():
+    """Regression: create_purchase_request returns a nested decision object that carries a signed token."""
+    import json
+    import time
+
+    from pact.server import _mcp_event
+    from pact.service import PactService
+    from pact.state import StateStore
+    from pact.tokens import TokenManager
+
+    service = PactService(StateStore("house-trace"), token_manager=TokenManager("trace-secret"))
+    secret = "eyJ" + "A" * 80
+    result = {"request": {"request_id": "purchase-1", "amount_cents": 100}, "decision": {"decision": "ask", "decision_token": secret}, "approval_token": secret, "order": {"order_id": "order-1", "client_secret": secret}}
+    _mcp_event("create_purchase_request", {"decision_token": secret, "product_id": "p"}, result, service, {"member_id": "maya", "household_id": "house-trace"}, time.perf_counter())
+    event = service.store.snapshot()["mcp_events"][-1] if "mcp_events" in service.store.snapshot() else service.store.mcp_events[-1]
+    assert secret not in json.dumps(event)
+    assert event["policy_decision"] == "ask" and event["order_id"] == "order-1"

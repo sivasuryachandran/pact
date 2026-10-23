@@ -61,6 +61,14 @@ function ProfileAvatar({ photo, name, className = '' }: { photo?: string | null;
   </span>;
 }
 
+/** ISO timestamps are shown in the viewer's own time zone, e.g. "Oct 22, 2026, 3:34 PM". */
+const formatWhen = (iso: unknown): string => {
+  const date = new Date(String(iso || ''));
+  return Number.isNaN(date.getTime()) ? String(iso || '') : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+};
+
+const pause = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
 function App() {
   const [auth, setAuth] = useState<ApiRecord | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -70,6 +78,8 @@ function App() {
   const [catalog, setCatalog] = useState<ApiRecord[]>([]);
   const [status, setStatus] = useState<ApiRecord | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>('ready');
+  const [chat, setChat] = useState<{ who: 'you' | 'pact'; text: string }[]>([]);
+  const addChat = useCallback((who: 'you' | 'pact', text: string) => setChat((items) => [...items.slice(-39), { who, text }]), []);
   const [transcript, setTranscript] = useState('Try “Plan Maya’s birthday under $150.”');
   const [commandText, setCommandText] = useState('');
   const [typedMode, setTypedMode] = useState(true);
@@ -87,6 +97,9 @@ function App() {
   const [provider, setProvider] = useState<ApiRecord | null>(null);
   const [categories, setCategories] = useState<ApiRecord[]>([]);
   const [mcpWire, setMcpWire] = useState<'pending' | 'verified' | 'unavailable'>('pending');
+  const [mcpHandshake, setMcpHandshake] = useState<ApiRecord | null>(null);
+  const [pendingPurchase, setPendingPurchase] = useState<ApiRecord | null>(null);
+  const executingRef = useRef(false);
   const [ttsStatus, setTtsStatus] = useState<ApiRecord | null>(null);
   const [avatarPhoto, setAvatarPhoto] = useState<string | null>(null);
   const conversationIdRef = useRef<string | null>(null);
@@ -169,6 +182,9 @@ function App() {
       const toolCall = await fetch('/mcp', { method: 'POST', credentials: 'same-origin', headers: { 'Accept': 'application/json, text/event-stream', 'Content-Type': 'application/json', 'MCP-Protocol-Version': initResult.result?.protocolVersion || '2025-11-25', ...(mcpSessionRef.current ? { 'Mcp-Session-Id': mcpSessionRef.current } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'get_rules', arguments: {} } }) });
       const result = await readMcpResponse(toolCall);
       if (!result.result?.structuredContent && !result.result?.content) throw new Error('MCP returned no tool result');
+      // The browser is a real MCP client: initialize, then tools/list (observed here), then tools/call (recorded server-side).
+      const listed = await readMcpResponse(await fetch('/mcp', { method: 'POST', credentials: 'same-origin', headers: { 'Accept': 'application/json, text/event-stream', 'Content-Type': 'application/json', 'MCP-Protocol-Version': initResult.result?.protocolVersion || '2025-11-25', ...(mcpSessionRef.current ? { 'Mcp-Session-Id': mcpSessionRef.current } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 'tools-list', method: 'tools/list', params: {} }) }));
+      setMcpHandshake({ protocol: initResult.result?.protocolVersion, server: initResult.result?.serverInfo?.name, server_version: initResult.result?.serverInfo?.version, tools: (listed.result?.tools || []).length, at: new Date().toLocaleTimeString() });
       setMcpWire('verified');
     } catch {
       setMcpWire('unavailable');
@@ -195,18 +211,68 @@ function App() {
 
   useEffect(() => { void verifyMcp(); }, [verifyMcp]);
 
+  const followDepthRef = useRef(0); // consecutive turns that started from an automatic follow-up window
+  const followArmedRef = useRef(false);
+  const lastFollowTextRef = useRef('');
+  const micRef = useRef<{ hold: (on: boolean, text?: string) => void; follow: (ms?: number) => void; listening: boolean } | null>(null);
   const speak = useCallback((text: string, next: VoiceState = 'ready') => {
     lastSpeechRef.current = text;
+    const mine = ++speakSeqRef.current; // cancel() fires the old utterance's end event late; ignore it
+    micRef.current?.hold(true, text); // the recognizer is stopped while PACT talks
     const settle = () => {
       setVoiceState(next);
-      if (next === 'allowed' || next === 'denied') window.setTimeout(() => setVoiceState('ready'), 1400);
+      if (next === 'allowed' || next === 'denied') window.setTimeout(() => setVoiceState('ready'), 2600);
+      // A natural pause, then PACT listens again. A question gets a longer window to answer.
+      window.setTimeout(() => {
+        if (mine !== speakSeqRef.current) return; // a newer utterance owns the mic
+        micRef.current?.hold(false);
+        if (micRef.current?.listening && next !== 'thinking' && followDepthRef.current < 2 && lastFollowTextRef.current !== text) { lastFollowTextRef.current = text; followArmedRef.current = true; micRef.current.follow(/\?\s*$/.test(text.trim()) ? 14000 : 8000); setVoiceState('listening'); }
+      }, 650);
     };
     if (muted || prefs.voice_enabled === false) { settle(); return; }
-    const mine = ++speakSeqRef.current; // cancel() fires the old utterance's end event late; ignore it
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     setVoiceState('speaking');
     playPactCue(next === 'approval' ? 'approval' : next === 'allowed' ? 'approved' : next === 'denied' ? 'denied' : 'speaking');
 
+    // Sentence-sized utterances sound conversational on browser voices: the
+    // short breath between them is much less like a screen reader reading a
+    // paragraph. The actual words still come from the PACT response.
+    const parts = text.replace(/\s+/g, ' ').trim().match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+    const lang = String(prefs.language || 'en-US');
+    const chooseVoice = () => {
+      const voices = window.speechSynthesis.getVoices();
+      const exact = voices.filter((voice) => voice.lang.toLowerCase().replace('_', '-') === lang.toLowerCase());
+      const language = exact.length ? exact : voices.filter((voice) => voice.lang.toLowerCase().startsWith(lang.toLowerCase().split('-')[0]));
+      const quality = ['premium', 'enhanced', 'natural', 'neural', 'siri'];
+      const preferred = ['samantha', 'ava', 'zoe', 'google us english', 'microsoft aria', 'daniel'];
+      return language.find((voice) => quality.some((name) => voice.name.toLowerCase().includes(name)))
+        || language.find((voice) => preferred.some((name) => voice.name.toLowerCase().includes(name)))
+        || language.find((voice) => voice.localService)
+        || language[0]
+        || voices.find((voice) => voice.localService)
+        || voices[0];
+    };
+    let speakPart: (index: number) => void;
+    const browserSpeak = () => {
+      if (!('speechSynthesis' in window)) { settle(); return; }
+      speakPart(0);
+    };
+    speakPart = (index: number) => {
+      if (mine !== speakSeqRef.current) return;
+      const utterance = new SpeechSynthesisUtterance(parts[index].trim());
+      utterance.voice = chooseVoice() || null;
+      utterance.lang = lang;
+      utterance.rate = .8;
+      utterance.pitch = 1.03;
+      utterance.volume = .9;
+      utterance.onend = () => {
+        if (mine !== speakSeqRef.current) return;
+        if (index + 1 < parts.length) window.setTimeout(() => speakPart(index + 1), 420);
+        else settle();
+      };
+      utterance.onerror = () => { if (mine === speakSeqRef.current) settle(); };
+      window.speechSynthesis.speak(utterance);
+    };
     const configured = String(ttsStatus?.tts?.configured_provider || 'browser');
     if ((configured === 'polly' || configured === 'auto') && typeof Audio !== 'undefined') {
       void (async () => {
@@ -226,68 +292,38 @@ function App() {
       return;
     }
 
-    // Sentence-sized utterances sound conversational on browser voices: the
-    // short breath between them is much less like a screen reader reading a
-    // paragraph. The actual words still come from the PACT response.
-    const parts = text.replace(/\s+/g, ' ').trim().match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
-    const lang = String(prefs.language || 'en-US');
-    const chooseVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      const language = voices.filter((voice) => voice.lang.toLowerCase().startsWith(lang.toLowerCase().split('-')[0]));
-      const preferred = ['samantha', 'ava', 'google us english', 'microsoft aria', 'daniel'];
-      return language.find((voice) => preferred.some((name) => voice.name.toLowerCase().includes(name)))
-        || language.find((voice) => voice.localService)
-        || language[0]
-        || voices.find((voice) => voice.localService)
-        || voices[0];
-    };
-    let speakPart: (index: number) => void;
-    const browserSpeak = () => {
-      if (!('speechSynthesis' in window)) { settle(); return; }
-      speakPart(0);
-    };
-    speakPart = (index: number) => {
-      if (mine !== speakSeqRef.current) return;
-      const utterance = new SpeechSynthesisUtterance(parts[index].trim());
-      utterance.voice = chooseVoice() || null;
-      utterance.lang = lang;
-      utterance.rate = .88;
-      utterance.pitch = 1.03;
-      utterance.volume = .9;
-      utterance.onend = () => {
-        if (mine !== speakSeqRef.current) return;
-        if (index + 1 < parts.length) window.setTimeout(() => speakPart(index + 1), 105);
-        else settle();
-      };
-      utterance.onerror = () => { if (mine === speakSeqRef.current) settle(); };
-      window.speechSynthesis.speak(utterance);
-    };
-    speakPart(0);
     browserSpeak();
   }, [muted, prefs.language, prefs.voice_enabled, ttsStatus]);
 
   const stopSpeaking = useCallback(() => {
     speakSeqRef.current += 1;
+    micRef.current?.hold(false);
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     setVoiceState('ready');
   }, []);
 
   const presentResult = useCallback(async (result: ApiRecord) => {
+    addChat('pact', String(result.assistant_text || ''));
     setProvider(result.provider || null); setActiveResult(result); setTranscript(result.transcript?.user_text ? `You: ${result.transcript.user_text}\nPACT: ${result.assistant_text}` : result.assistant_text); setTrace(result.trace || []);
     const shown = decisionFromResult(result);
     const voice: VoiceState = shown === 'approval' ? 'approval' : shown ?? 'ready';
     speak(result.assistant_text, voice);
     await refresh();
-  }, [refresh, speak]);
+  }, [refresh, speak, addChat]);
 
   const sendCommand = useCallback(async (text: string, options: { speaker_id?: string; surface?: string } = {}) => {
     const clean = text.trim(); if (!clean) return null;
-    setError(''); setVoiceState('thinking'); if (!muted && prefs.voice_enabled !== false) playPactCue('thinking'); setTranscript(`You: ${clean}\nChecking household rules…`);
+    setError(''); setTranscript(`You: ${clean}`); addChat('you', clean);
+    // Every turn walks the whole sphere: heard → thinking → (speaking → outcome). Each stage is held long enough to be seen.
+    setVoiceState('transcribing'); await pause(700);
+    setVoiceState('thinking'); if (!muted && prefs.voice_enabled !== false) playPactCue('thinking'); setTranscript(`You: ${clean}\nChecking household rules…`);
+    const thinkingStarted = Date.now();
+    const filler = window.setTimeout(() => speak(['One moment.', 'Let me check on that.', 'Checking the house rules.'][Math.floor(Math.random() * 3)], 'thinking'), 2600);
     try {
       const result = await fetchJson('/api/command', { method: 'POST', body: JSON.stringify({ text: clean, speaker_id: options.speaker_id || 'maya', surface: options.surface || 'living_room', conversation_id: conversationIdRef.current }) });
-      conversationIdRef.current = result.conversation_id; await presentResult(result); return result;
-    } catch (reason) { setError(escapeText(reason)); setVoiceState('ready'); return null; }
-  }, [muted, prefs.voice_enabled, presentResult]);
+      conversationIdRef.current = result.conversation_id; window.clearTimeout(filler); await pause(Math.max(0, 1500 - (Date.now() - thinkingStarted))); await presentResult(result); return result;
+    } catch (reason) { window.clearTimeout(filler); setError(escapeText(reason)); setVoiceState('ready'); return null; }
+  }, [muted, prefs.voice_enabled, presentResult, addChat, speak]);
 
   const runMcpCommerce = useCallback(async (productId?: string) => {
     setError(''); setVoiceState('thinking'); setTranscript('MCP: searching the PACT Sandbox Catalog…');
@@ -311,6 +347,9 @@ function App() {
           approvalResult = { ...approvalResult, ...approved };
           approvalToken = approved.approval_token || null;
         } else {
+          // A member who cannot approve waits for an adult. The exact request and her own decision token stay here;
+          // execution happens only after an adult approves in a separate session.
+          setPendingPurchase({ product, action, decision: checked, approval_id: approvalResult.approval?.approval_id, approver: approvalResult.approval?.approver, status: 'pending', note: '' });
           setVoiceState('approval'); setTranscript(`${product.title} needs an authorized adult approval.`); await refresh(); return;
         }
       }
@@ -330,25 +369,82 @@ function App() {
     } catch (reason) { setError(escapeText(reason)); setVoiceState('denied'); }
   }, [auth, callMcpTool, refresh]);
 
+  const finishPurchase = useCallback(async (purchase: ApiRecord, approvalToken: string) => {
+    if (executingRef.current) return;
+    executingRef.current = true;   // the unchanged request is executed exactly once
+    try {
+      const executed = await callMcpTool('execute_action', { action: purchase.action, decision_token: purchase.decision.decision_token, approval_token: approvalToken });
+      const orderId = executed.order?.order_id || executed.payment?.order_id;
+      const order = orderId ? await callMcpTool('get_order_status', { order_id: orderId }) : null;
+      await callMcpTool('get_receipts', { limit: 20 });
+      setActiveResult({ assistant_text: executed.executed ? `${purchase.product.title} was approved by the household adult and ordered once.` : executed.error || 'Execution was refused.', mcpCommerce: true, product: purchase.product, decision: purchase.decision, approval: { approval: { status: 'approved' } }, executed, order: order?.order });
+      setTrace(['search_catalog', 'get_product', 'create_purchase_request', 'check_action', 'request_approval', 'get_approval_status', 'execute_action', ...(order ? ['get_order_status'] : []), 'get_receipts']);
+      setTranscript(executed.executed ? `${purchase.product.title} ordered. Receipt recorded.` : executed.error || 'Execution was refused.');
+      setVoiceState(executed.executed ? 'allowed' : 'denied');
+      setPendingPurchase(null);
+      await refresh();
+    } catch (reason) { setPendingPurchase((current) => current ? { ...current, note: escapeText(reason) } : current); }
+  }, [callMcpTool, refresh]);
+
+  useEffect(() => { // the requester polls her own approval; the token only reaches her after an adult approves
+    if (!pendingPurchase?.approval_id || pendingPurchase.status !== 'pending') return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await callMcpTool('get_approval_status', { approval_id: pendingPurchase.approval_id });
+        const state = status.approval?.status;
+        if (state === 'approved' && status.approval_token) { window.clearInterval(timer); setPendingPurchase((current) => current ? { ...current, status: 'approved' } : current); void finishPurchase(pendingPurchase, status.approval_token); }
+        else if (state === 'rejected') { window.clearInterval(timer); setPendingPurchase((current) => current ? { ...current, status: 'rejected' } : current); setVoiceState('denied'); }
+      } catch { /* keep waiting */ }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [pendingPurchase, callMcpTool, finishPurchase]);
+
+  useEffect(() => { // adults need to see new requests from other members without reloading
+    if (!auth?.authenticated || !auth.session?.household_id || !auth.session?.can_approve) return undefined;
+    // One lightweight request every 4 s (about 15 per minute), only while the tab is visible, to stay far below the household rate limit.
+    const timer = window.setInterval(() => { if (!document.hidden) void fetchJson('/api/state').then(setState).catch(() => undefined); }, 4000);
+    return () => window.clearInterval(timer);
+  }, [auth]);
+
+  const tryApproveMyself = useCallback(async () => {
+    if (!pendingPurchase) return;
+    try {
+      await callMcpTool('approve', { approval_id: pendingPurchase.approval_id, approver: String(auth?.session?.member_id || auth?.user?.user_id || ''), approved: true });
+      setPendingPurchase({ ...pendingPurchase, note: 'Unexpectedly accepted.' });
+    } catch { setPendingPurchase({ ...pendingPurchase, note: 'Refused by PACT: only an adult approver can approve this request, so you cannot approve it yourself.' }); }
+  }, [pendingPurchase, callMcpTool, auth]);
+
+  const decideApproval = useCallback(async (approvalId: string, approved: boolean) => {
+    try { await callMcpTool('approve', { approval_id: approvalId, approver: String(auth?.session?.member_id || auth?.user?.user_id || ''), approved }); await refresh(); }
+    catch (reason) { setError(escapeText(reason)); }
+  }, [callMcpTool, auth, refresh]);
+
   const searchProducts = useCallback(async (query: string, filters: ApiRecord = {}) => callMcpTool('search_catalog', { query, filters, limit: 20 }), [callMcpTool]);
 
   const voice = useWakeVoice({
+    onSleep: () => { followArmedRef.current = false; setVoiceState((current) => (current === 'listening' || current === 'transcribing' ? 'ready' : current)); },
     onWake: (source) => {
       stopSpeaking();
       if (source === 'wake') {
         const firstName = String(auth?.user?.display_name || 'there').split(/\s+/)[0];
-        speak(`Hey ${firstName}, what can I do for you?`, 'ready');
+        speak(`Hey ${firstName}. What can I do for you?`, 'ready');
       } else {
         setVoiceState('listening');
         if (!muted && prefs.voice_enabled !== false) playPactCue('wake');
       }
     },
-    onCommand: (text) => void sendCommand(text),
+    onCommand: (text) => {
+      followDepthRef.current = followArmedRef.current ? followDepthRef.current + 1 : 0; // a person who keeps talking resets it; echo and noise cannot loop forever
+      followArmedRef.current = false;
+      if (text.trim().split(/\s+/).length < 2 && followDepthRef.current > 0) return;
+      void sendCommand(text);
+    },
     onHeard: (text) => { if (text) stopSpeaking(); setVoiceState('transcribing'); setTranscript(`Listening… ${text}`); },
     onError: (message) => { setVoiceState('error'); setError(`Voice input unavailable (${message}). Typed input remains ready.`); },
     lang: prefs.language,
   });
   const micOn = voice.listening;
+  micRef.current = { hold: voice.hold, follow: voice.follow, listening: voice.listening };
   useEffect(() => {
     if (view !== 'home' || !auth?.authenticated || !auth.session?.household_id || muted || prefs.voice_enabled === false || !voice.supported || micOn) return undefined;
     const timer = window.setTimeout(() => { voice.start(); }, 350);
@@ -401,16 +497,17 @@ function App() {
     <main>
       <div className={`honesty-line ${view === 'home' ? 'home-corner-status' : ''}`}><span className="core-status"><i />PACT Core online <b>(v2.4-active)</b></span><span className="addon-status">Simulated Alexa+ add-on</span><span className="honesty-guardrails">Deterministic Guardrails: <b>ENFORCED</b></span></div>
       <AnimatePresence mode="wait"><motion.div key={view} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: .22 }}>
-        {view === 'home' && <Home categories={categories} onCategory={(label: string) => void sendCommand(`Recommend ${label.toLowerCase()} near me`)} provider={provider} onSettings={() => setSettingsOpen(true)} coreState={coreState} voiceState={voiceState} transcript={transcript} activeResult={activeResult} plan={plan} pendingApproval={pendingApproval} memberCount={memberCount} demoRunning={demoRunning} micOn={micOn} muted={muted} voiceSupported={voice.supported} typedMode={typedMode} onToggleTyped={() => setTypedMode((value) => !value)} privateMessage={privateMessage} onMic={toggleMic} onMute={toggleMute} onStopSpeaking={stopSpeaking} onReplay={() => speak(lastSpeechRef.current)} onText={(event) => setCommandText(event.target.value)} commandText={commandText} onSend={() => { const text = commandText; setCommandText(''); void sendCommand(text); }} onDemo={() => void runDemo()} onApprove={() => void approveCurrent()} onPrivate={() => void privateRoute()} />}
+        {view === 'home' && <Home categories={categories} onCategory={(label: string) => void sendCommand(`Recommend ${label.toLowerCase()} near me`)} provider={provider} onSettings={() => setSettingsOpen(true)} coreState={coreState} voiceState={voiceState} transcript={transcript} chat={chat} activeResult={activeResult} plan={plan} pendingApproval={pendingApproval} memberCount={memberCount} demoRunning={demoRunning} micOn={micOn} muted={muted} voiceSupported={voice.supported} typedMode={typedMode} onToggleTyped={() => setTypedMode((value) => !value)} privateMessage={privateMessage} onMic={toggleMic} onMute={toggleMute} onStopSpeaking={stopSpeaking} onReplay={() => speak(lastSpeechRef.current)} onText={(event) => setCommandText(event.target.value)} commandText={commandText} onSend={() => { const text = commandText; setCommandText(''); void sendCommand(text); }} onDemo={() => void runDemo()} onApprove={() => void approveCurrent()} onPrivate={() => void privateRoute()} />}
         {view === 'household' && <HouseholdDashboard wallet={wallet} approvals={state.approvals || []} onWallet={() => setView('wallet')} auth={auth} />}
         {view === 'wallet' && <WalletPage wallet={wallet} catalog={catalog} onRefresh={refresh} canManage={Boolean(auth.session?.account_role === 'owner' || auth.session?.can_manage_rules)} onMcpPurchase={(product) => void runMcpCommerce(product.product_id)} onMcpSearch={searchProducts} />}
         {view === 'rules' && <Rules proposal={proposal} proposalText={proposalText} setProposalText={setProposalText} onPropose={() => void propose()} onConfirm={() => void confirm()} rules={state.rules || []} />}
-        {view === 'activity' && <Activity receipts={receipts} walletActivity={wallet.activity || []} rules={state.rules || []} approvals={state.approvals || []} plans={state.plans || []} planActions={state.plan_actions || []} trustEvents={state.trust_events || []} mcpEvents={state.mcp_events || []} paymentOrders={state.payment_orders || {}} catalog={catalog} mcpWire={mcpWire} />}
+        {view === 'activity' && <Activity handshake={mcpHandshake} receipts={receipts} walletActivity={wallet.activity || []} rules={state.rules || []} approvals={state.approvals || []} plans={state.plans || []} planActions={state.plan_actions || []} trustEvents={state.trust_events || []} mcpEvents={state.mcp_events || []} paymentOrders={state.payment_orders || {}} catalog={catalog} mcpWire={mcpWire} />}
         {view === 'about' && <About />}
         {view === 'developer' && <Developer status={status} trace={trace} />}
         {view === 'profile' && <SettingsDrawer open fullPage onClose={() => setView('home')} onChange={setPrefs} onAfterReset={() => { conversationIdRef.current = null; setActiveResult(null); setProvider(null); void refresh(); }} displayName={identityName} avatarPhoto={avatarPhoto} onAvatarPhotoChange={handleAvatarPhotoChange} />}
       </motion.div></AnimatePresence>
       {settingsOpen && view !== 'profile' && <SettingsDrawer open onClose={() => { setSettingsOpen(false); if (window.location.hash === '#settings') history.replaceState(null, '', window.location.pathname + window.location.search); }} onChange={setPrefs} onAfterReset={() => { conversationIdRef.current = null; setActiveResult(null); setProvider(null); void refresh(); }} displayName={identityName} avatarPhoto={avatarPhoto} onAvatarPhotoChange={handleAvatarPhotoChange} />}
+      <ApprovalDock pending={pendingPurchase} approvals={(state.approvals || []) as ApiRecord[]} me={String(auth?.session?.member_id || auth?.user?.user_id || '')} canApprove={Boolean(auth?.session?.can_approve)} onApprove={decideApproval} onSelfApprove={tryApproveMyself} />
       {error && <div className="error-banner" role="alert">{error}</div>}
     </main>
     {brandOpen && <BrandModal onClose={() => setBrandOpen(false)} onAbout={() => { setBrandOpen(false); setView('about'); }} />}
@@ -485,7 +582,33 @@ function HouseholdOnboarding({ auth, onAuthenticated }: { auth: ApiRecord; onAut
   </div></div>;
 }
 
-function Home(props: { categories: ApiRecord[]; onCategory: (label: string) => void; provider: ApiRecord | null; onSettings: () => void; coreState: PactCoreState; voiceState: VoiceState; transcript: string; activeResult: ApiRecord | null; plan: ApiRecord | undefined; pendingApproval: boolean; memberCount: number; demoRunning: boolean; micOn: boolean; muted: boolean; voiceSupported: boolean; typedMode: boolean; onToggleTyped: () => void; privateMessage: string; onMic: () => void; onMute: () => void; onStopSpeaking: () => void; onReplay: () => void; onText: (event: ChangeEvent<HTMLInputElement>) => void; commandText: string; onSend: () => void; onDemo: () => void; onApprove: () => void; onPrivate: () => void }) {
+function ApprovalDock({ pending, approvals, me, canApprove, onApprove, onSelfApprove }: { pending: ApiRecord | null; approvals: ApiRecord[]; me: string; canApprove: boolean; onApprove: (id: string, approved: boolean) => void; onSelfApprove: () => void }) {
+  const queue = canApprove ? approvals.filter((item) => item.status === 'pending' && item.approver === me && item.bound) : [];
+  if (!pending && !queue.length) return null;
+  const money = (cents?: number) => `$${((Number(cents) || 0) / 100).toFixed(2)}`;
+  return <div className="approval-dock" aria-live="polite">
+    {pending && <section className="dock-card" aria-label="Waiting for an adult to approve">
+      <span className="section-label">{pending.status === 'rejected' ? 'DECLINED' : pending.status === 'approved' ? 'APPROVED · ORDERING' : 'ASK · WAITING FOR AN ADULT'}</span>
+      <strong>{pending.product?.title} · {money(pending.action?.amount_cents)}</strong>
+      <p>PACT returned <b>ASK</b>. An adult must approve this exact request from their own session. You cannot approve it yourself.</p>
+      {pending.status === 'pending' && <button className="secondary-action" onClick={onSelfApprove}>Try to approve it myself</button>}
+      {pending.note && <p className="dock-note" role="status">{pending.note}</p>}
+    </section>}
+    {queue.map((item) => <section className="dock-card" key={item.approval_id} aria-label="Approval requested">
+      <span className="section-label">APPROVAL REQUESTED</span>
+      <strong>{item.bound.product_id} · {money(item.bound.amount_cents)} × {item.bound.quantity ?? 1}</strong>
+      <dl className="bound-fields">
+        <div><dt>Requested by</dt><dd>{item.bound.member_id}</dd></div><div><dt>Payment method</dt><dd>{item.bound.payment_method_id}</dd></div>
+        <div><dt>Device</dt><dd>{item.bound.device_id}</dd></div><div><dt>Provider</dt><dd>{item.bound.provider} (simulated)</dd></div>
+        <div><dt>Product revision</dt><dd>{item.bound.product_revision}</dd></div><div><dt>Policy version</dt><dd>{item.policy_version}</dd></div>
+        <div><dt>Household</dt><dd>{item.bound.household_id}</dd></div><div><dt>Request hash</dt><dd>{String(item.request_hash).slice(0, 18)}…</dd></div>
+      </dl>
+      <div className="dock-actions"><button className="primary-action" onClick={() => onApprove(item.approval_id, true)}>Approve exact request</button><button className="secondary-action" onClick={() => onApprove(item.approval_id, false)}>Decline</button></div>
+    </section>)}
+  </div>;
+}
+
+function Home(props: { categories: ApiRecord[]; onCategory: (label: string) => void; provider: ApiRecord | null; onSettings: () => void; coreState: PactCoreState; voiceState: VoiceState; transcript: string; chat: { who: 'you' | 'pact'; text: string }[]; activeResult: ApiRecord | null; plan: ApiRecord | undefined; pendingApproval: boolean; memberCount: number; demoRunning: boolean; micOn: boolean; muted: boolean; voiceSupported: boolean; typedMode: boolean; onToggleTyped: () => void; privateMessage: string; onMic: () => void; onMute: () => void; onStopSpeaking: () => void; onReplay: () => void; onText: (event: ChangeEvent<HTMLInputElement>) => void; commandText: string; onSend: () => void; onDemo: () => void; onApprove: () => void; onPrivate: () => void }) {
   const stateCopy: Record<PactCoreState, { title: string; sub: string }> = {
     idle: { title: 'Say something…', sub: 'Ready' },
     listening: { title: 'I’m listening', sub: 'Mic Active' },
@@ -520,7 +643,8 @@ function Home(props: { categories: ApiRecord[]; onCategory: (label: string) => v
           <div className="voice-transcript" aria-live="polite">{props.transcript}</div>
         </div>
         <div className="typed-chat-dock" aria-label="PACT chat fallback">
-          <div className="typed-chat-heading"><span>CHAT</span><small>Text fallback</small></div>
+          <div className="typed-chat-heading"><span>CONVERSATION</span><small>{props.chat.length ? `${props.chat.length} messages` : 'Say “Hey PACT” or type'}</small></div>
+          <div className="chat-log" role="log" aria-live="polite" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>{props.chat.map((item, index) => <div key={index} className={`chat-bubble ${item.who}`}><b>{item.who === 'you' ? 'You' : 'PACT'}</b><span>{item.text}</span></div>)}</div>
           {props.typedMode && <div className="typed-fallback"><input aria-label="Typed PACT command" placeholder="Type a request instead…" value={props.commandText} onChange={props.onText} onKeyDown={(event) => { if (event.key === 'Enter') props.onSend(); }} /><button className="send-button" onClick={props.onSend}>Send</button></div>}
           <div className="chat-actions"><button onClick={props.onStopSpeaking} disabled={props.voiceState !== 'speaking'}>Stop speaking</button><button onClick={props.onReplay} disabled={!props.activeResult}>Replay response</button><span>PACT speaks responses aloud</span></div>
         </div>
@@ -608,15 +732,15 @@ function HouseholdDashboard({ wallet, approvals, onWallet, auth }: { wallet: Api
       <section className="glass-panel household-security-panel" aria-labelledby="invite-member-title">
         <div className="panel-heading"><div><span className="section-label">MEMBERS</span><h2 id="invite-member-title">Invite a family member</h2></div><span className="status-chip violet">ONE-TIME CODE</span></div>
         {canInvite ? <form className="wallet-form" onSubmit={(event) => void createInvite(event)}><div className="form-row"><label>Role<select value={role} onChange={(event) => { setRole(event.target.value); setPermissionTemplate(event.target.value === 'adult' ? 'standard_adult' : event.target.value === 'child' ? 'request_only' : event.target.value === 'caregiver' ? 'caregiver_explicit' : 'limited_spending'); }}><option value="adult">Adult</option><option value="teen">Teen</option><option value="child">Child</option><option value="caregiver">Caregiver</option></select></label><label>Initial permission<select value={permissionTemplate} onChange={(event) => setPermissionTemplate(event.target.value)}><option value="standard_adult">Standard adult</option><option value="limited_spending">Limited spending</option><option value="request_only">Request only</option><option value="caregiver_explicit">Caregiver — explicit actions</option></select></label></div><label>Expires<select value={expiresMinutes} onChange={(event) => setExpiresMinutes(event.target.value)}><option value="60">1 hour</option><option value="1440">24 hours</option><option value="10080">7 days</option></select></label><button className="primary-button" disabled={busy}>Generate invite</button></form> : <p className="muted">Only the household owner or an authorized adult can invite members.</p>}
-        {invite && <div className="generated-invite"><div><span className="section-label">SHARE THIS INVITE</span><strong>{invite.role} · {invite.permission_template}</strong><ShareValue value={invite.code} label="Copy code" /><ShareValue value={invite.invite_link} label="Copy link" /><small>Expires {invite.expires_at}</small></div><QrCode value={invite.invite_link} label="QR code for family invite" /></div>}
-        <div className="pending-list"><span className="section-label">PENDING INVITES</span>{invites.filter((item) => !item.accepted_at && !item.revoked_at).length ? invites.filter((item) => !item.accepted_at && !item.revoked_at).map((item) => <div className="pending-row" key={item.invite_id}><span><strong>{item.role}</strong><small>{item.permission_template} · expires {item.expires_at}</small></span>{canInvite && <button className="text-button" disabled={busy} onClick={() => void revokeInvite(item.invite_id)}>Revoke</button>}</div>) : <p className="muted">No pending family invites.</p>}</div>
+        {invite && <div className="generated-invite"><div><span className="section-label">SHARE THIS INVITE</span><strong>{invite.role} · {invite.permission_template}</strong><ShareValue value={invite.code} label="Copy code" /><ShareValue value={invite.invite_link} label="Copy link" /><small>Expires {formatWhen(invite.expires_at)}</small></div><QrCode value={invite.invite_link} label="QR code for family invite" /></div>}
+        <div className="pending-list"><span className="section-label">PENDING INVITES</span>{invites.filter((item) => !item.accepted_at && !item.revoked_at).length ? invites.filter((item) => !item.accepted_at && !item.revoked_at).map((item) => <div className="pending-row" key={item.invite_id}><span><strong>{item.role}</strong><small>{item.permission_template} · expires {formatWhen(item.expires_at)}</small></span>{canInvite && <button className="text-button" disabled={busy} onClick={() => void revokeInvite(item.invite_id)}>Revoke</button>}</div>) : <p className="muted">No pending family invites.</p>}</div>
       </section>
       <section className="glass-panel household-security-panel" aria-labelledby="trusted-device-title">
         <div className="panel-heading"><div><span className="section-label">TRUSTED DEVICES</span><h2 id="trusted-device-title">Pair a household device</h2></div><span className="status-chip">ADULT APPROVAL</span></div>
         <form className="wallet-form" onSubmit={(event) => void startPairing(event)}><label>Device name<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="Siva’s MacBook" required /></label><button className="secondary-action" disabled={busy}>Start pairing</button><small className="form-footnote">A different authorized adult must approve this browser before it becomes trusted.</small></form>
-        {pairing && <div className="generated-invite"><div><span className="section-label">PAIRING REQUEST</span><strong>{pairing.device_name}</strong><ShareValue value={pairing.code} label="Copy code" /><small>Expires {pairing.expires_at}</small></div><QrCode value={pairing.pairing_link} label="QR code for trusted device pairing" /></div>}
+        {pairing && <div className="generated-invite"><div><span className="section-label">PAIRING REQUEST</span><strong>{pairing.device_name}</strong><ShareValue value={pairing.code} label="Copy code" /><small>Expires {formatWhen(pairing.expires_at)}</small></div><QrCode value={pairing.pairing_link} label="QR code for trusted device pairing" /></div>}
         {pairings.length > 0 && <div className="pending-list"><span className="section-label">ADULT REVIEW QUEUE</span>{pairings.map((item) => <div className="pending-row" key={item.pairing_id}><span><strong>{item.device_name}</strong><small>{item.device_type} · {item.approved_at ? 'approved' : 'awaiting approval'}</small></span>{!item.approved_at && item.requesting_user_id !== auth.session?.user_id && <button className="text-button" disabled={busy} onClick={() => void approvePairing(item.pairing_id)}>Approve</button>}</div>)}</div>}
-        <div className="pending-list"><span className="section-label">TRUSTED DEVICES</span>{devices.length ? devices.map((item) => <div className="pending-row" key={item.device_id}><span><strong>{item.device_name}</strong><small>{item.device_type} · {item.revoked_at ? 'revoked' : `trusted ${item.trusted_at}`}</small></span>{!item.revoked_at && <button className="text-button" disabled={busy} onClick={() => void revokeDevice(item.device_id)}>Revoke</button>}</div>) : <p className="muted">No trusted devices yet.</p>}</div>
+        <div className="pending-list"><span className="section-label">TRUSTED DEVICES</span>{devices.length ? devices.map((item) => <div className="pending-row" key={item.device_id}><span><strong>{item.device_name}</strong><small>{item.device_type} · {item.revoked_at ? 'revoked' : `trusted ${formatWhen(item.trusted_at)}`}</small></span>{!item.revoked_at && <button className="text-button" disabled={busy} onClick={() => void revokeDevice(item.device_id)}>Revoke</button>}</div>) : <p className="muted">No trusted devices yet.</p>}</div>
       </section>
     </div>
     {message && <div className="error-banner" role="alert">{message}</div>}
@@ -681,7 +805,7 @@ function ProductDiscovery({ catalog, onSearch, onPurchase }: { catalog: ApiRecor
   </div>;
 }
 
-function Activity({ receipts, walletActivity, rules, approvals, plans, planActions, trustEvents, mcpEvents, paymentOrders, catalog, mcpWire }: { receipts: ApiRecord[]; walletActivity: ApiRecord[]; rules: ApiRecord[]; approvals: ApiRecord[]; plans: ApiRecord[]; planActions: ApiRecord[]; trustEvents: ApiRecord[]; mcpEvents: ApiRecord[]; paymentOrders: ApiRecord | Record<string, ApiRecord>; catalog: ApiRecord[]; mcpWire: 'pending' | 'verified' | 'unavailable' }) {
+function Activity({ handshake, receipts, walletActivity, rules, approvals, plans, planActions, trustEvents, mcpEvents, paymentOrders, catalog, mcpWire }: { handshake: ApiRecord | null; receipts: ApiRecord[]; walletActivity: ApiRecord[]; rules: ApiRecord[]; approvals: ApiRecord[]; plans: ApiRecord[]; planActions: ApiRecord[]; trustEvents: ApiRecord[]; mcpEvents: ApiRecord[]; paymentOrders: ApiRecord | Record<string, ApiRecord>; catalog: ApiRecord[]; mcpWire: 'pending' | 'verified' | 'unavailable' }) {
   const serverMcpEvents = [...mcpEvents].sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
   const entries: ApiRecord[] = [...walletActivity.map((item): ApiRecord => ({ ...item, kind: 'wallet' })), ...receipts.map((item): ApiRecord => ({ ...item, kind: 'receipt' })), ...serverMcpEvents.map((item): ApiRecord => ({ ...item, kind: 'mcp' }))].sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
   const latestReceipt = receipts[0];
@@ -703,13 +827,13 @@ function Activity({ receipts, walletActivity, rules, approvals, plans, planActio
     <div className="trust-summary-grid"><div className="summary-card"><span className="section-label">LATEST DECISION</span><strong className={`trust-decision trust-${decision.toLowerCase()}`}>{decision}</strong><span>{latestReceipt?.reason || 'Run a household request to populate the trust record.'}</span></div><div className="summary-card"><span className="section-label">POLICY VERSION</span><strong>{latestReceipt?.policy_version || '—'}</strong><span>{rules.length} confirmed rule{rules.length === 1 ? '' : 's'}</span></div><div className="summary-card"><span className="section-label">MCP IDENTITY</span><strong>{mcpWire === 'verified' ? 'VERIFIED' : mcpWire === 'unavailable' ? 'UNAVAILABLE' : 'CHECKING'}</strong><span>Authenticated browser transport</span></div><div className="summary-card"><span className="section-label">RECEIPT INTEGRITY</span><strong>{receipts.length ? 'CHAINED' : 'READY'}</strong><span>{receipts.length ? 'Tamper-evident local records' : 'No receipt yet'}</span></div></div>
     <div className="trust-focus-grid">
       <article className="glass-panel trust-case-card"><div className="panel-heading"><div><span className="section-label">HOUSEHOLD COMMERCE CASE</span><h2>{selectedTitle}</h2></div><span className={`status-chip ${decision.toLowerCase()}`}>{decision}</span></div><div className="trust-facts"><div><span>Amount</span><strong>{latestAction.amount_cents ? money(latestAction.amount_cents) : '—'} {latestAction.currency || ''}</strong></div><div><span>Member</span><strong>{latestAction.beneficiary || latestReceipt?.subject_id || latestReceipt?.member_id || '—'}</strong></div><div><span>Payment method</span><strong>{latestAction.payment_method_id ? `•••• ${String(latestAction.payment_method_id).slice(-4)}` : 'Household boundary'}</strong></div><div><span>Payment result</span><strong>{paymentStatus}</strong></div></div><div className="trust-case-detail"><span className="section-label">RULE MATCHED</span><p>{latestReceipt?.rule_id || planActions[planActions.length - 1]?.decision || 'Deterministic policy evaluation is shown here after a request.'}</p><span className="section-label">APPROVAL EVENT</span><p>{latestApproval ? `${latestApproval.status} · ${latestApproval.approver || 'required adult'} · exact request hash bound` : 'No approval event recorded for the latest case.'}</p><span className="section-label">PLAN EXPOSURE</span><p>{latestPlan ? `${money(latestPlan.exposure_cents)} committed of ${money(latestPlan.budget_cents)} · ${money(latestPlan.remaining_cents)} remaining` : 'No active household plan yet.'}</p></div></article>
-      <article className="glass-panel trust-trace-card"><div className="panel-heading"><div><span className="section-label">SERVER-RECORDED MCP TRACE</span><h2>One path to a safe purchase</h2></div><span className="status-chip violet">{serverMcpEvents.length ? 'LIVE EVENTS' : 'MCP SURFACE'}</span></div>{!serverMcpEvents.length && <p className="muted">Run “MCP purchase flow” from Wallet to record the authenticated commerce journey here.</p>}<div className="tool-trace">{trace.map(([name, observed], index) => <div className={observed ? 'tool-trace-row observed' : 'tool-trace-row'} key={name}><span>{String(index + 1).padStart(2, '0')}</span><strong>{name}</strong><small>{observed ? 'recorded' : 'ready'}</small></div>)}</div><details className="redacted-trace"><summary>View redacted JSON-RPC events</summary><pre>{JSON.stringify(redactedTrace, null, 2)}</pre></details></article>
+      <article className="glass-panel trust-trace-card">{handshake && <div className="mcp-handshake" aria-label="MCP session handshake"><span className="section-label">BROWSER-OBSERVED MCP HANDSHAKE</span><span>initialize → protocol {handshake.protocol} · {handshake.server} {handshake.server_version}</span><span>tools/list → {handshake.tools} tools · observed {handshake.at}</span><span>tools/call → recorded below by the server, tokens redacted</span></div>}<div className="panel-heading"><div><span className="section-label">SERVER-RECORDED MCP TRACE</span><h2>One path to a safe purchase</h2></div><span className="status-chip violet">{serverMcpEvents.length ? 'LIVE EVENTS' : 'MCP SURFACE'}</span></div>{!serverMcpEvents.length && <p className="muted">Run “MCP purchase flow” from Wallet to record the authenticated commerce journey here.</p>}<div className="tool-trace">{trace.map(([name, observed], index) => <div className={observed ? 'tool-trace-row observed' : 'tool-trace-row'} key={name}><span>{String(index + 1).padStart(2, '0')}</span><strong>{name}</strong><small>{observed ? 'recorded' : 'ready'}</small></div>)}</div><details className="redacted-trace"><summary>View redacted JSON-RPC events</summary><pre>{JSON.stringify(redactedTrace, null, 2)}</pre></details></article>
     </div>
     <div className="trust-lower-grid"><article className="glass-panel trust-receipt-card"><div className="panel-heading"><div><span className="section-label">RECEIPT & ORDER</span><h2>Evidence that closes the loop</h2></div><span className="status-chip allow">LOCAL SANDBOX</span></div>{latestReceipt ? <div className="receipt-proof"><div><span>Receipt</span><strong>{latestReceipt.receipt_id}</strong></div><div><span>Order status</span><strong>{latestOrder?.status || (latestReceipt.result === 'executed' ? 'completed' : latestReceipt.result)}</strong></div><div><span>Hash</span><strong>{String(latestReceipt.receipt_hash || '').slice(0, 25)}…</strong></div><div><span>Previous hash</span><strong>{latestReceipt.previous_hash ? `${latestReceipt.previous_hash.slice(0, 25)}…` : 'genesis'}</strong></div></div> : <p className="muted">Run the Maya birthday plan or a marketplace action to create a receipt.</p>}</article><article className="glass-panel trust-members-card"><div className="panel-heading"><div><span className="section-label">AUDIT SIGNALS</span><h2>Human authority stays visible</h2></div></div><div className="audit-signal"><strong>{trustEvents.filter((item) => item.event === 'approval').length}</strong><span>adult approval events</span></div><div className="audit-signal"><strong>{receipts.filter((item) => item.result === 'rejected').length}</strong><span>safe refusals</span></div><div className="audit-signal"><strong>{planActions.length}</strong><span>exact plan actions</span></div></article></div>
     <div className="activity-stream-heading"><span className="section-label">ACTIVITY TIMELINE</span><span className="muted">Server-recorded MCP events, wallet changes, and policy receipts</span></div><div className="activity-list">{entries.length ? entries.map((item) => <div className="activity-row" key={item.receipt_hash || item.event_id || `${item.timestamp}-${item.action || item.tool}`}><span className={`result-dot ${item.kind === 'wallet' ? 'allowed' : item.kind === 'mcp' ? 'allowed' : item.result}`} /><div><strong>{item.kind === 'wallet' ? String(item.event || '').replaceAll('_', ' ') : item.kind === 'mcp' ? `${item.tool} · ${item.member_id || 'authenticated member'}` : `${item.action || 'policy event'} · ${item.subject_id || 'simulated household'}`}</strong><span>{item.kind === 'mcp' ? `${String(item.policy_decision || 'recorded').toUpperCase()} · ${item.latency_ms}ms · ${item.request_id}` : item.reason || item.display_name || item.permission_id || 'PACT recorded the event'}{item.receipt_hash ? ` · ${item.receipt_hash.slice(0, 18)}…` : ''}</span></div><span className="status-chip">{item.kind === 'wallet' ? 'wallet' : item.kind === 'mcp' ? 'mcp' : item.result || 'recorded'}</span></div>) : <p className="muted">Run the MCP purchase flow or configure the wallet to create activity.</p>}</div>
   </section>;
 }
-function Developer({ status, trace }: { status: ApiRecord | null; trace: string[] }) { return <section className="page-section"><PageIntro eyebrow="DEVELOPER" title="One boundary for every add-on." body="Both VenueBook and GiftCart use the same check_action → approval → execute contract. This panel is a live view of the local sandbox status." /><div className="developer-grid"><div className="glass-panel"><span className="section-label">MCP RUNTIME</span><div className="runtime-row"><strong>Streamable HTTP</strong><span>{status?.protocol?.minimum_hackathon_handshake || 'loading'}</span></div><div className="runtime-row"><strong>SDK</strong><span>{status?.mcp_sdk_version || 'loading'}</span></div><div className="runtime-row"><strong>Bedrock</strong><span>{status?.bedrock?.available ? `${status.bedrock.model_id} · ${status.bedrock.region}` : 'deterministic fallback'}</span></div><pre className="snippet">{`const decision = await pact.check_action(action);\nif (decision.decision === "ask") await pact.request_approval(action, decision.decision_token);\nawait pact.execute_action(action, decision.decision_token, approval_token);`}</pre></div><div className="glass-panel"><span className="section-label">LIVE TOOL TRACE</span>{trace.length ? trace.map((item, index) => <div className="dev-trace" key={`${item}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span>{item}</div>) : <p className="muted">Use the Home command deck to populate the trace.</p>}<div className="security-proof"><strong>Adversarial suite</strong><span>240 deterministic attempts · 0 bypasses · 0 unauthorized executions</span></div></div></div></section>; }
+function Developer({ status, trace }: { status: ApiRecord | null; trace: string[] }) { return <section className="page-section"><PageIntro eyebrow="DEVELOPER" title="One boundary for every add-on." body="Product discovery, comparison, purchase requests, approvals and execution all use the same check_action → approval → execute contract over MCP. This panel is a live view of the local sandbox status." /><div className="developer-grid"><div className="glass-panel"><span className="section-label">MCP RUNTIME</span><div className="runtime-row"><strong>Streamable HTTP</strong><span>{status?.protocol?.minimum_hackathon_handshake || 'loading'}</span></div><div className="runtime-row"><strong>SDK</strong><span>{status?.mcp_sdk_version || 'loading'}</span></div><div className="runtime-row"><strong>Bedrock</strong><span>{status?.bedrock?.available ? `${status.bedrock.model_id} · ${status.bedrock.region}` : 'deterministic fallback'}</span></div><pre className="snippet">{`const decision = await pact.check_action(action);\nif (decision.decision === "ask") await pact.request_approval(action, decision.decision_token);\nawait pact.execute_action(action, decision.decision_token, approval_token);`}</pre></div><div className="glass-panel"><span className="section-label">LIVE TOOL TRACE</span>{trace.length ? trace.map((item, index) => <div className="dev-trace" key={`${item}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span>{item}</div>) : <p className="muted">Use the Home command deck to populate the trace.</p>}<div className="security-proof"><strong>Adversarial suite</strong><span>240 deterministic attempts · 0 bypasses · 0 unauthorized executions</span></div></div></div></section>; }
 function About() {
   return <section className="page-section about-page">
     <div className="about-brand-hero">
